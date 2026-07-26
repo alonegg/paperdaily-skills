@@ -90,7 +90,7 @@ MAX_QUOTE_CHARS = 500
 CLAIM_STATUSES = ("supported", "weak", "contested", "gap")
 MIN_EVIDENCE_RATE = 0.80
 
-SKILL_VER_FALLBACK = "0.3.0"
+SKILL_VER_FALLBACK = "0.3.2"
 DEFAULT_TIMEOUT = 60
 MAX_POST_ATTEMPTS = 3  # AGENT_PROTOCOL §6: backoff-retry cap
 
@@ -421,9 +421,54 @@ def build_payload(session_dir: str, title: Optional[str], taxonomy: Optional[str
 
 
 # ─────────────────────────── HTTP ───────────────────────────
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Never follow a redirect while holding the bearer key.
+
+    Two reasons (2026-07-26 audit): stdlib urllib replays custom headers —
+    including `Authorization` — across origins, and it rewrites a redirected
+    POST into a GET *without* the body. The second one is the nastier of the
+    pair: it would return 200 from the redirect target while nothing was
+    uploaded. A redirect here is a misconfigured PD_BASE, so surface it.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def _check_pd_base(pd_base: str) -> Optional[str]:
+    """Refuse to send the bearer key over plaintext to a public host.
+    http:// stays legal for loopback / RFC1918 (the documented internal
+    default of a self-hosted instance is a private address); everything
+    else needs TLS."""
+    parts = urllib.parse.urlsplit(pd_base)
+    scheme = (parts.scheme or "").lower()
+    host = (parts.hostname or "").lower()
+    if scheme == "https":
+        return None
+    if scheme != "http":
+        return "PD_BASE must be an http(s) URL (got %r)" % (scheme or pd_base,)
+    if host in ("localhost", "127.0.0.1", "::1") or host.endswith(".local"):
+        return None
+    try:
+        import ipaddress
+
+        if ipaddress.ip_address(host).is_private:
+            return None
+    except Exception:
+        pass
+    return (
+        "PD_BASE uses plaintext http:// on a public host (%s) — the API key would "
+        "travel in the clear. Use https:// (or a private/loopback address for a "
+        "self-hosted instance)." % (host or "?")
+    )
+
+
 def post_session(pd_base: str, pd_key: str, payload: dict, timeout: int) -> Tuple[Optional[int], str]:
     """POST with up to MAX_POST_ATTEMPTS attempts on 429/5xx (honours Retry-After).
     Returns (status, body_text); status None = network failure."""
+    bad_base = _check_pd_base(pd_base)
+    if bad_base:
+        return None, bad_base
     url = pd_base.rstrip("/") + "/me/reading-sessions"
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     headers = {
@@ -431,11 +476,12 @@ def post_session(pd_base: str, pd_key: str, payload: dict, timeout: int) -> Tupl
         "Content-Type": "application/json",
         "User-Agent": "paperdaily-deep-research/upload_session %s" % _skill_ver(),
     }
+    opener = urllib.request.build_opener(_NoRedirect())
     last_err = ""
     for attempt in range(1, MAX_POST_ATTEMPTS + 1):
         req = urllib.request.Request(url, data=data, headers=headers, method="POST")
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
+            with opener.open(req, timeout=timeout) as resp:
                 status = getattr(resp, "status", None) or resp.getcode()
                 return status, resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as e:
@@ -444,6 +490,14 @@ def post_session(pd_base: str, pd_key: str, payload: dict, timeout: int) -> Tupl
                 body = e.read().decode("utf-8", "replace")
             except Exception:
                 pass
+            if 300 <= e.code < 400:  # _NoRedirect refused to follow
+                loc = e.headers.get("Location") if e.headers else None
+                return e.code, (
+                    "server redirected the upload (Location: %s) — refused, because "
+                    "following it would leak the bearer key across origins and turn "
+                    "the POST into a bodyless GET. Point PD_BASE at the final URL."
+                    % (loc or "?")
+                )
             if e.code == 429 or e.code >= 500:
                 if attempt < MAX_POST_ATTEMPTS:
                     retry_after = e.headers.get("Retry-After") if e.headers else None

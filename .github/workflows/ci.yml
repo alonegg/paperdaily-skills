@@ -1,0 +1,54 @@
+name: checks
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  syntax-and-secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash syntax
+        run: |
+          set -e
+          found=0
+          while IFS= read -r f; do
+            bash -n "$f"
+            found=$((found + 1))
+          done < <(find . -name '*.sh' -not -path './.git/*')
+          echo "checked $found shell scripts"
+          test "$found" -gt 0
+
+      - name: python syntax
+        run: |
+          set -e
+          python3 -m compileall -q $(find . -name '*.py' -not -path './.git/*')
+
+      - name: no credentials in tree
+        run: |
+          set -e
+          # Real keys, private keys, and internal hosts must never land here.
+          # pd_live_ placeholders are all-x or all-CAPS by convention, so a
+          # mixed-case 20+ body is the tell.
+          patterns=(
+            'pd_live_[A-Za-z0-9_-]{20,}'
+            'BEGIN [A-Z ]*PRIVATE KEY'
+            '10\.6\.64\.[0-9]+'
+            '192\.168\.78\.[0-9]+'
+            '/Users/[a-z]+/Desktop'
+          )
+          rc=0
+          for p in "${patterns[@]}"; do
+            if grep -rInE --exclude-dir=.git --exclude=ci.yml "$p" . ; then
+              echo "::error::forbidden pattern matched: $p"
+              rc=1
+            fi
+          done
+          # Placeholder keys are fine; assert the ones present really are.
+          grep -rIoE 'pd_live_[A-Za-z0-9_-]+' --exclude-dir=.git . \
+            | grep -vE 'pd_live_(x+|X+|TESTKEY|your_key_here)$' && {
+                echo "::error::a pd_live_ literal that is not an obvious placeholder"; rc=1; } || true
+          exit $rc

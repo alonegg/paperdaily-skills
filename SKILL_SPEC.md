@@ -1,8 +1,8 @@
 # Paperdaily Skill 规范（v1）
 
-> **Status**: 定稿（2026-07-26，随 0.8.0）。`paperdaily-deep-research` 的符合性自查已做（结果见文末兼容矩阵 + 已知偏差）；`paperdaily`（thin）自查待做。
+> **Status**: 定稿（2026-07-26）。两个 skill 的符合性自查均已完成，结果见文末兼容矩阵 + 已知偏差。
 > **适用**: 所有与 paperdaily v1 API 交互的 agent skills——现有 `paperdaily`（thin 查询）、`paperdaily-deep-research`（三阶段深读）；未来任何新 skill。
-> **上游**: 协议契约见仓库根 `AGENT_PROTOCOL.md`；架构与合规红线的设计权威在 paperdaily 服务端内部设计文档（未随本仓库公开），本文与 `AGENT_PROTOCOL.md` 是其对外呈现层。
+> **上游**: 协议契约见 `AGENT_PROTOCOL.md`（合规红线在其 §7）。
 
 ## 十条规范
 
@@ -35,18 +35,30 @@ report.md / overview.md   综述
 
 **9. 行为**。尊重限流（429 + Retry-After，退避上限 3 次）；回传幂等（worklist fingerprint）；网络瞬断指数退避；长任务分阶段可中断可续跑。
 
-**10. 演进**。本规范 semver 化；skill 升级时同步声明兼容的协议版本；规范变更与消费它的实现同 commit；破坏性变更先在 `V1_KNOWN_ISSUES.md` 立案。
+**10. 演进**。本规范 semver 化；skill 升级时同步声明兼容的协议版本；规范变更与消费它的实现同 commit；破坏性变更先在已知问题清单立案。
 
 ## 兼容矩阵
 
 | skill | skill_ver | 协议版本 | 符合性 |
 |---|---|---|---|
-| paperdaily（thin） | — | v1 | 待自查（未随 0.8.0 批次，声明件与检索段未核对） |
-| paperdaily-deep-research | 0.2.0 | v1 | 0.8.0 自查通过（2026-07-26；十条逐条核对，剩余不满足项如实列于下节「已知偏差」） |
+| paperdaily（thin） | 0.2.0 | v1 | 2026-07-26 自查通过（声明件补齐；条 4 同意点整改——watchlist 三个写动作全部改为显式确认、`write:profile` 改 just-in-time 索取；偏差见下节） |
+| paperdaily-deep-research | 0.3.2 | v1 | 2026-07-26 自查通过（十条逐条核对；0.3.2 补凭证/隐私整改：跨 origin 剥凭证、UA 去 PII、账本脱敏、上传面禁跳；剩余不满足项如实列于下节「已知偏差」） |
 
-## 已知偏差（deep-research 0.8.0 自查，如实记录）
+## 已知偏差（thin 0.2.0 自查，2026-07-26）
 
-自查口径：对照上文十条逐条核对 `paperdaily-deep-research/` 的 SKILL.md
+1. **条 1（声明件）——本次补齐**。原无声明块，现于 SKILL.md 头部声明
+   skill_ver / 协议版本 / scopes（默认只读三件，`write:profile` 按需索取）。
+2. **条 4（同意点）——本次整改**。原文把 watchlist `run` 写成「mostly
+   safe」并在 pre-flight 默认索取 `write:profile`，与本条直接冲突；现改为
+   create/delete/run 三个动作一律显式确认、写 scope just-in-time 索取。
+3. **条 2（phase-gate）——不适用**。thin skill 是单次查询包装，无多阶段
+   落盘工件链。
+4. **条 3/8（provenance / 产物树）——不适用**。不产生落盘产物，输出即
+   终端 markdown；无回传通道。
+
+## 已知偏差（deep-research 自查，如实记录）
+
+自查口径：对照上文十条逐条核对 `skills/paperdaily-deep-research/` 的 SKILL.md
 与三个脚本。满足项不赘述；以下为**仍不满足或仅部分满足**的条目：
 
 1. **条 2（phase-gate 可机检）——部分满足**。阶段 1→2（worklist 行数/字段

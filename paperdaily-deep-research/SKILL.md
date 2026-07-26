@@ -6,8 +6,8 @@ description: End-to-end deep literature research on top of the paperdaily platfo
 # paperdaily-deep-research
 
 > **声明块（SKILL_SPEC §1）**
-> - **skill_ver**: `0.3.1`
-> - **协议版本**: AGENT_PROTOCOL v1（仓库根 `AGENT_PROTOCOL.md`；检索走其 §2
+> - **skill_ver**: `0.3.2`
+> - **协议版本**: AGENT_PROTOCOL v1（`docs/api/AGENT_PROTOCOL.md`；检索走其 §2
 >   分层端点，收件箱走其 §5 任务协议）
 > - **所需 scopes**: `read:digest, read:paper, synth:ask`；阶段 0（可选收件箱）
 >   另需 `read:reading`（缺失时跳过该阶段不报错）；领取任务（claim）与阶段 4
@@ -84,21 +84,19 @@ curl -sS -o /dev/null -w "%{http_code}\n" "$PD_BASE/openapi.json"   # 期望 200
 「转给我的 agent 深读」）。起手时若 key 带 `read:reading`，先拉一眼收件箱
 （端点契约见 AGENT_PROTOCOL §5）：
 
-> A1 端点待生产部署后验证，验证通过后去除下方 `# [待验证]` 标注。
-
 ```sh
-scripts/pd_inbox.sh              # [待验证] 表格列出 pending 任务（id/kind/论文数/created_at/note；
+scripts/pd_inbox.sh              # 表格列出 pending 任务（id/kind/论文数/created_at/note；
                                  #   answer_question 任务 NOTE 列显示 question:<question_id>）
-scripts/pd_inbox.sh --json       # [待验证] 机器可读 {items:[…]}——payload 原样透传
+scripts/pd_inbox.sh --json       # 机器可读 {items:[…]}——payload 原样透传
                                  #   （deep_read 读 paper_ids；answer_question 读 seed_paper_ids）
-scripts/pd_inbox.sh --claim <id> # [待验证] 领取（pending → claimed）
+scripts/pd_inbox.sh --claim <id> # 领取（pending → claimed）
 ```
 
 规程：
 
 1. 列出任务后**交给用户选**——做哪个、还是不做直接进阶段 1，都由用户定。
    key 缺 `read:reading` 时脚本打印补签指引后 exit 0（不是报错），直接跳过
-   本阶段即可；404（服务端尚未部署 A1）同样跳过。
+   本阶段即可；404（服务端版本低于 0.8.1 或未启用收件箱）同样跳过。
 2. 选中的 `deep_read` 任务 → 其 `payload.paper_ids` 作阶段 1 的 `--paper`
    种子：单篇直接 `pd_worklist.sh --paper <id>`；多篇取**第一篇**做种子跑
    完后，把其余 id 逐篇 `GET /papers/{id}` 取 detail 并入 `worklist.jsonl`
@@ -109,11 +107,11 @@ scripts/pd_inbox.sh --claim <id> # [待验证] 领取（pending → claimed）
 
    ```sh
    curl -sS -H "Authorization: Bearer $PD_KEY" \
-     "$PD_BASE/me/questions/<question_id>"   # [待验证] read:reading；响应 .question 即原文
+     "$PD_BASE/me/questions/<question_id>"   # read:reading；响应 .question 即原文
    ```
 
-   （端点不可用——404/服务端未部署——时再请用户在 web 工作台「问题」页签
-   给出原文作降级。）`seed_paper_ids` 取**首篇**作 `--paper` 种子，其余 id
+   （端点不可用——404/服务端版本低于 0.8.2——时再请用户在 web 工作台「问题」
+   页签给出原文作降级。）`seed_paper_ids` 取**首篇**作 `--paper` 种子，其余 id
    按上一条同款并入 `worklist.jsonl`（`source` 标 `"seed"`）。后续阶段与
    deep_read 无异。
 4. **领取（`--claim`）放在用户确认要做之后**，不要一列出来就抢占——
@@ -162,7 +160,7 @@ worklist，种子在首行（`source:"seed"`）；`--similar` 在此模式下不
 ## 阶段 2 — 全文 PDF 获取（瀑布）
 
 ```sh
-export UNPAYWALL_EMAIL="you@example.org"          # OA 定位必需（免费，只是 polite 邮箱）
+export UNPAYWALL_EMAIL="you@example.org"          # OA 定位必需（免费；用途见下方「邮箱去哪」）
 # export PD_FETCH_INSTITUTIONAL=1                 # 见下方合规边界
 # export ELSEVIER_TDM_KEY=… WILEY_TDM_TOKEN=…     # 可选，机构有 TDM key 才配
 
@@ -174,6 +172,14 @@ python3 scripts/fetch_fulltext.py --worklist pd-research/<slug>/worklist.jsonl \
 PMC/Europe PMC → 出版商 TDM API（有 key 才走）→ 机构订阅直连（opt-in）
 → Playwright 浏览器兜底（opt-in）→ 失败落账本。细节与排查见
 [references/fulltext-sources.md](references/fulltext-sources.md)。
+
+**邮箱去哪（隐私边界）**：`UNPAYWALL_EMAIL` 只发给要求联系邮箱的 polite-pool
+API——`api.unpaywall.org` / `api.crossref.org` / NCBI-PMC / EBI（作查询参数）。
+它**不进 User-Agent**，所以出版商站点、CDN、从页面 metadata 抠出的第三方地址
+都看不到它；写进 `fetch_report.jsonl` 的 URL 也会把 `email`/`token`/`key` 类
+参数掩码成 `<redacted>`。凭证（TDM key、平台 key）遇跨 origin 跳转会被剥掉并
+在账本记 `cred_stripped_on_redirect`——所以跨域跳转后的 401 是**预期**，不是
+出版商故障。
 
 **合规边界（对用户说清楚再开）**：
 

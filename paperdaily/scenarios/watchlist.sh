@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario 3: manage watchlists — user-defined topic-tracking jobs that
-# scan weekly. v0.1 author-dogfood only; v0.2 will GA.
+# scan weekly (server cap: 5 watchlists per user).
 #
 # Sub-commands:
 #   watchlist.sh list
@@ -12,6 +12,10 @@
 #
 # Scope: write:profile (the API holds /me/watchlists under that single
 # permission class — same as /me/topics, /me/feedback).
+#
+# WRITE surface: create / delete / run all mutate server state and must be
+# confirmed with the user before invocation (SKILL.md scenario 3, SKILL_SPEC
+# rule 4). list / show / entries are pure reads.
 
 set -euo pipefail
 source "$(dirname "$0")/../_lib.sh"

@@ -39,7 +39,10 @@ CLI
   python3 fetch_fulltext.py --arxiv 2501.01234 --out pdfs/
 
   --report        default: <out>/../fetch_report.jsonl
-  --email / env UNPAYWALL_EMAIL   polite email for Unpaywall/Crossref (L2 needs it)
+  --email / env UNPAYWALL_EMAIL   contact email for the polite-pool APIs that
+                  require one. Sent ONLY to api.unpaywall.org / api.crossref.org /
+                  NCBI-PMC / EBI — never in the User-Agent seen by publishers,
+                  CDNs or landing pages, and masked out of fetch_report.jsonl.
   --timeout       per-request timeout, seconds (default 30)
   --throttle      min seconds between requests to the SAME host (default 1.0)
 
@@ -96,17 +99,124 @@ _META_TAG_RE = re.compile(rb"<meta\b[^>]*>", re.IGNORECASE)
 _META_NAME_RE = re.compile(rb"""(?:name|property)\s*=\s*["']([^"']+)["']""", re.IGNORECASE)
 _META_CONTENT_RE = re.compile(rb"""content\s*=\s*["']([^"']*)["']""", re.IGNORECASE)
 
+# ── credential / privacy hygiene (2026-07-26 audit) ──────────────────
+# URLs reach this script from three places we do not control: the server's
+# worklist, publisher landing pages (`citation_pdf_url`), and API responses.
+# Only ever speak http(s) — stdlib urlopen would happily read `file:///…`
+# on a first hop (its redirect handler blocks non-http schemes, the opener
+# does not) and hand local file bytes to the downstream reading stages.
+_ALLOWED_SCHEMES = ("http", "https")
+
+# Headers that authenticate US and must never cross an origin boundary.
+# stdlib `urllib` — unlike requests/urllib3 — replays every custom header
+# verbatim on a cross-host 30x, so this has to be enforced by hand.
+_CRED_HEADER_NAMES = frozenset(
+    ("authorization", "x-els-apikey", "wiley-tdm-client-token")
+)
+
+# Hosts whose API contract asks for a contact email (polite pools). The
+# user's address goes to THESE and nowhere else — never into the global
+# User-Agent, which would broadcast it to every publisher/CDN in the
+# waterfall.
+_POLITE_HOSTS = (
+    "api.unpaywall.org",
+    "api.crossref.org",
+    "pmc.ncbi.nlm.nih.gov",
+    "www.ncbi.nlm.nih.gov",
+    "eutils.ncbi.nlm.nih.gov",
+    "www.ebi.ac.uk",
+)
+
+# Query params that carry contact/credential material and must be masked
+# before a URL is written to the on-disk ledger.
+_SENSITIVE_PARAMS = frozenset(
+    ("email", "mailto", "api_key", "apikey", "key", "token", "access_token")
+)
+
+
+def _origin(url: str) -> Tuple[str, str, Optional[int]]:
+    p = urllib.parse.urlsplit(url)
+    return (p.scheme.lower(), p.hostname or "", p.port)
+
+
+def _netloc(scheme: str, host: str, port: Optional[int]) -> str:
+    return "%s://%s%s" % (scheme, host or "?", ":%d" % port if port else "")
+
+
+def _is_polite_host(url: str) -> bool:
+    host = (urllib.parse.urlsplit(url).hostname or "").lower()
+    return host in _POLITE_HOSTS
+
+
+def _redact_url(url: str) -> str:
+    """Mask contact/credential query params for ledger writes."""
+    if not url or "?" not in url:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    kept = []
+    for k, v in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        kept.append((k, "<redacted>" if k.lower() in _SENSITIVE_PARAMS else v))
+    return urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, parts.path, urllib.parse.urlencode(kept), parts.fragment)
+    )
+
+
+class _CredSafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow redirects, but never carry credentials across an origin.
+
+    Two rules, both learned from the 2026-07-26 external audit:
+      • origin change (scheme/host/port) → strip every credential header
+        and record it, so a resulting 401/403 is diagnosable instead of
+        looking like a publisher outage;
+      • https → http downgrade → refuse the redirect outright (returning
+        None makes urllib surface the 30x as an HTTPError, which the
+        caller records as a normal non-2xx attempt).
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.events: List[str] = []
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is None:
+            return None
+        old_scheme, old_host, old_port = _origin(req.full_url)
+        new_scheme, new_host, new_port = _origin(new.full_url)
+        if new_scheme not in _ALLOWED_SCHEMES:
+            self.events.append("blocked_redirect_scheme:%s" % new_scheme)
+            return None
+        if old_scheme == "https" and new_scheme == "http":
+            self.events.append("blocked_https_downgrade:%s" % (new_host or "?"))
+            return None
+        if (new_scheme, new_host, new_port) != (old_scheme, old_host, old_port):
+            dropped = [
+                k for k in list(new.headers) if k.lower() in _CRED_HEADER_NAMES
+            ]
+            for k in dropped:
+                del new.headers[k]
+            if dropped:
+                self.events.append(
+                    "cred_stripped_on_redirect:%s→%s"
+                    % (_netloc(old_scheme, old_host, old_port),
+                       _netloc(new_scheme, new_host, new_port))
+                )
+        return new
+
 
 # ─────────────────────────── small helpers ───────────────────────────
 class HttpResult:
-    __slots__ = ("status", "final_url", "content_type", "body", "error")
+    __slots__ = ("status", "final_url", "content_type", "body", "error", "redirect_notes")
 
-    def __init__(self, status, final_url, content_type, body, error):
+    def __init__(self, status, final_url, content_type, body, error, redirect_notes=None):
         self.status: Optional[int] = status
         self.final_url: str = final_url
         self.content_type: str = content_type or ""
         self.body: bytes = body or b""
         self.error: Optional[str] = error
+        # Credential/redirect events worth surfacing in the ledger (see
+        # _CredSafeRedirectHandler). Empty list = nothing unusual happened.
+        self.redirect_notes: List[str] = list(redirect_notes or ())
 
 
 class Throttle:
@@ -138,8 +248,20 @@ class Config:
         self.wiley_token: Optional[str] = os.environ.get("WILEY_TDM_TOKEN")
         self.institutional: bool = os.environ.get("PD_FETCH_INSTITUTIONAL") == "1"
         self.browser: bool = os.environ.get("PD_FETCH_BROWSER") == "1"
-        contact = self.email or "https://www.paperdaily.org"
-        self.user_agent = "paperdaily-deep-research/%s (mailto:%s)" % (VERSION, contact)
+        # Default UA carries NO personal data. The polite-pool variant (with
+        # the user's mailto) is used only for _POLITE_HOSTS — see ua_for().
+        self.user_agent = "paperdaily-deep-research/%s (+https://www.paperdaily.org)" % VERSION
+        self.polite_user_agent = (
+            "paperdaily-deep-research/%s (mailto:%s)" % (VERSION, self.email)
+            if self.email
+            else self.user_agent
+        )
+
+    def ua_for(self, url: str) -> str:
+        """Contact email only goes to hosts that ask for one (Unpaywall,
+        Crossref, NCBI/EBI). Every other host — publishers, CDNs, landing
+        pages harvested from third-party HTML — sees the neutral UA."""
+        return self.polite_user_agent if _is_polite_host(url) else self.user_agent
 
 
 def _is_pdf_bytes(body: bytes) -> bool:
@@ -206,31 +328,44 @@ def _http_get(
     timeout: Optional[int] = None,
 ) -> HttpResult:
     timeout = timeout or config.timeout
+    scheme = urllib.parse.urlsplit(url).scheme.lower()
+    if scheme not in _ALLOWED_SCHEMES:
+        # file:// / ftp:// / data: never come from a source we trust.
+        return HttpResult(None, url, "", b"", "blocked_scheme: %s" % (scheme or "(none)",))
     config.throttle.wait(url)
-    headers = {"User-Agent": config.user_agent, "Accept": accept}
+    headers = {"User-Agent": config.ua_for(url), "Accept": accept}
     if extra_headers:
         headers.update(extra_headers)
     req = urllib.request.Request(url, headers=headers)
+    # Fresh handler per call: urllib keeps no connection pool, so the only
+    # thing an opener carries is redirect state — which we want per-request.
+    redirects = _CredSafeRedirectHandler()
+    opener = urllib.request.build_opener(
+        redirects, urllib.request.HTTPSHandler(context=_SSL_CTX)
+    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=_SSL_CTX) as resp:
+        with opener.open(req, timeout=timeout) as resp:
             status = getattr(resp, "status", None) or resp.getcode()
             final_url = resp.geturl()
             ctype = resp.headers.get("Content-Type", "") if resp.headers else ""
             body = resp.read(MAX_DOWNLOAD_BYTES + 1)
-            return HttpResult(status, final_url, ctype, body, None)
+            return HttpResult(status, final_url, ctype, body, None, redirects.events)
     except urllib.error.HTTPError as e:  # 4xx/5xx — still a response
         try:
             body = e.read(MAX_DOWNLOAD_BYTES + 1)
         except Exception:
             body = b""
         ctype = e.headers.get("Content-Type", "") if getattr(e, "headers", None) else ""
-        return HttpResult(e.code, url, ctype, body, None)
+        return HttpResult(e.code, url, ctype, body, None, redirects.events)
     except urllib.error.URLError as e:
-        return HttpResult(None, url, "", b"", "urlerror: %s" % (getattr(e, "reason", e),))
+        return HttpResult(None, url, "", b"", "urlerror: %s" % (getattr(e, "reason", e),),
+                          redirects.events)
     except (TimeoutError, ssl.SSLError, ConnectionError) as e:
-        return HttpResult(None, url, "", b"", "%s: %s" % (type(e).__name__, e))
+        return HttpResult(None, url, "", b"", "%s: %s" % (type(e).__name__, e),
+                          redirects.events)
     except Exception as e:  # never let one URL crash the run
-        return HttpResult(None, url, "", b"", "%s: %s" % (type(e).__name__, e))
+        return HttpResult(None, url, "", b"", "%s: %s" % (type(e).__name__, e),
+                          redirects.events)
 
 
 def _fetch_json(url: str, config: Config, layer: str, attempts: List[dict]) -> Optional[Any]:
@@ -250,38 +385,51 @@ def _fetch_json(url: str, config: Config, layer: str, attempts: List[dict]) -> O
 
 
 def _attempt(layer: str, url: str, outcome: str, http_status: Optional[int], note: str) -> dict:
+    # URLs land in fetch_report.jsonl on disk — mask contact/credential
+    # query params first (Unpaywall/PMC put the user's email in the URL).
     return {
         "layer": layer,
-        "url": url,
+        "url": _redact_url(url),
         "outcome": outcome,
         "http_status": http_status,
         "note": note,
     }
 
 
+def _with_redirect_notes(r: HttpResult, note: str) -> str:
+    """Append credential/redirect events so a 401 after a cross-origin hop
+    reads as 'we dropped the key on purpose', not 'publisher flaked'."""
+    if not r.redirect_notes:
+        return note
+    return "%s [%s]" % (note, "; ".join(r.redirect_notes))
+
+
 def _record_pdf_attempt(r: HttpResult, layer: str, url: str, attempts: List[dict]) -> Optional[bytes]:
     """Turn a raw HttpResult into a PDF (bytes) or an attempt record. Never trusts
     Content-Type; validates the %PDF magic."""
     if r.error is not None:
-        attempts.append(_attempt(layer, url, "error", None, r.error[:200]))
+        attempts.append(_attempt(layer, url, "error", None,
+                                 _with_redirect_notes(r, r.error[:200])))
         return None
     if r.status is not None and 200 <= r.status < 300:
         if len(r.body) > MAX_DOWNLOAD_BYTES:
             attempts.append(_attempt(layer, url, "error", r.status, "exceeds_50mb"))
             return None
         if _is_pdf_bytes(r.body):
-            attempts.append(_attempt(layer, url, "ok", r.status, "pdf %d bytes" % len(r.body)))
+            attempts.append(_attempt(layer, url, "ok", r.status,
+                                     _with_redirect_notes(r, "pdf %d bytes" % len(r.body))))
             return r.body
         note = "not_pdf"
         if r.content_type:
             note += " (%s)" % r.content_type.split(";")[0][:40]
         if _looks_like_challenge(r.body):
             note += " challenge"
-        attempts.append(_attempt(layer, url, "denied", r.status, note))
+        attempts.append(_attempt(layer, url, "denied", r.status, _with_redirect_notes(r, note)))
         return None
     # non-2xx
     outcome = "error" if (r.status is None or r.status >= 500 or r.status == 429) else "denied"
-    attempts.append(_attempt(layer, url, outcome, r.status, "http %s" % r.status))
+    attempts.append(_attempt(layer, url, outcome, r.status,
+                             _with_redirect_notes(r, "http %s" % r.status)))
     return None
 
 
@@ -423,10 +571,12 @@ def _run_waterfall(paper: dict, config: Config, attempts: List[dict]) -> Tuple[O
     if doi:
         # NOTE: the classic idconv host (www.ncbi.nlm.nih.gov/pmc/utils/idconv/v1.0)
         # now 301-redirects to the pmc.ncbi.nlm.nih.gov API below; hit it directly.
+        # `email=` only when the user actually supplied one — a fake contact
+        # address is worse than none for a polite-pool API.
         conv = ("https://pmc.ncbi.nlm.nih.gov/tools/idconv/api/v1/articles/?ids=%s&format=json"
-                "&tool=paperdaily-deep-research&email=%s" % (
-                    urllib.parse.quote(doi, safe=""),
-                    urllib.parse.quote(config.email or "anonymous@example.org")))
+                "&tool=paperdaily-deep-research" % urllib.parse.quote(doi, safe=""))
+        if config.email:
+            conv += "&email=%s" % urllib.parse.quote(config.email)
         data = _fetch_json(conv, config, "L3_pmc", attempts)
         pmcid = None
         if isinstance(data, dict):

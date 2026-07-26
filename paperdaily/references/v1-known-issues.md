@@ -1,115 +1,87 @@
-# paperdaily `/api/v1/*` — known issues (skill-side mirror)
+# paperdaily `/api/v1/*` — known issues (user-facing)
 
-Skill-side mirror of the canonical issue register maintained by the paperdaily server team.
+What an agent or CLI user can observe, plus the workaround. Server-side
+root causes, table/query internals and post-mortems are **not** in this
+file — they live in the paperdaily server's own issue register, and the
+detail is of no use to a client anyway.
 
-Letter ids are stable; entries are never silently renumbered.
+Format per entry: symptom you can see → affected versions → workaround →
+status. Stable letter ids (A→P); entries are never silently renumbered.
+
+Found something new? Follow SKILL.md "Bug reporting protocol" — notes go
+to `~/.paperdaily-cli/bug-reports/`, redacted, never into this file.
+Suspected **security** problem → `SECURITY.md`, private channel, not a
+public issue.
 
 ## Open
 
-### P — `GET /papers?q=` title search misses papers plain listing returns
+### D — citations / authors sparse for non-`W…` paper ids
 
-The `q=` title search under-recalls badly: papers that a plain (no-`q`)
-listing in the same scope returns are not found when you add a `q=` that
-matches their title. Not a data-state issue — the papers ARE in the
-corpus and reachable by direct id and by `/ask` semantic retrieval.
+**Symptom.** `GET /papers/{id}/citations` returns `items: []` and
+`GET /papers/{id}/authors` returns 404 for `arxiv:…` ids and journal-stub
+ids. The same calls work on OpenAlex `W…` ids.
 
-Repro (2026-07-20, scope `subfield_id=1702` = Artificial Intelligence):
+**Affected.** All versions to date.
 
-| request | result |
-|---|---|
-| `?subfield_id=1702&year_from=2026` (no q, plain list) | OK — `ssrn:7123198` is row 2 |
-| `?q=Harnessing LLMs&subfield_id=1702&year_from=2026` | **0 hits** — yet `ssrn:7123198`'s title starts "Harnessing LLMs…" and is in scope |
-| `?q=Large Language Models&subfield_id=1702&year_from=2026` | **1 hit only** — while `_count` for that scope = 98,322 |
-| `?q=Harnessing&subfield_id=1702` (drop year filter) | 60s timeout, 0 bytes |
-| direct `GET /papers/ssrn:7123198` | 200, full detail |
-| `POST /ask` semantic route | found it (`find_papers_by_keyword_semantic`) |
+**Workaround.** For authors, ask the detail endpoint instead:
+`GET /papers/{id}?include=authors_full`. For citations on a freshly
+ingested paper, retry later — that part of the graph is filled
+asynchronously.
 
-So within one scope, a paper the listing enumerates cannot be retrieved
-by a `q=` matching its own title. The `q=` path also requires a
-topic/subfield/field scope (400 otherwise) and times out on broad
-scopes without a year filter.
+**Status.** Open, and it is a data state rather than a request bug. An
+empty citation list on a paper published this week is expected; don't
+report it.
 
-Same-day repro on a second title: searching for "A Comprehensive Review
-of Large Language Models: Taxonomy, Architectures, Data, Adaptation, and
-Evaluation (2013-2026)" (`ssrn:7063638`, pub 2026-07-16) returned 0 hits
-across every title-substring variant tried; the paper was only located
-via `/ask` semantic retrieval, then confirmed by direct id fetch.
+## Closed
 
-**Workarounds** (both used above):
-- Locate by id you already have: `GET /papers/{id}`.
-- Discover by content: `POST /ask` with an instruction to use
-  `find_papers_by_keyword_semantic`, then confirm with a direct id fetch.
+### P — `GET /papers?q=` missed papers that plain listing returned
 
-Backend fix is out of scope for this read-only skill; report new repros
-upstream instead.
+**Symptom.** Searching a distinctive fragment of a paper's own title
+returned nothing, while listing the same corpus slice showed that paper.
+Broad scopes without a year filter could also time out.
 
-### D — citation graph and AUTHORED edges sparse for non-W papers
+**Affected.** Server < 0.8.0.
 
-Not a code bug, a data-state observation. Two related symptoms:
+**Status.** Fixed in 0.8.0 — `q=` now runs against the same search
+projection the web UI uses. Prefer `GET /papers/search?q=&mode=auto`,
+which walks identifier → title → semantic and tells you which layer
+matched.
 
-- `GET /papers/{id}/citations` returns `items: []` for freshly-ingested
-  arxiv and most W- papers. Older W- papers (e.g. `W3197929691`, 2021)
-  populate. Backfill is async per-paper.
-- `GET /papers/{id}/authors` returns 404 for `arxiv:…` paper ids and
-  journal-stub ids (`tpds.2026.3666309`-style). It works correctly on
-  W- papers that have AUTHORED edges populated by the OpenAlex ingest
-  (e.g. `W4416083181` returns 20 authors with id/orcid/position). For
-  paper id types that the ETL doesn't write AUTHORED edges for, the
-  workaround is `GET /papers/{id}?include=authors_full` which reads
-  from the relational `paper_authors` table instead.
+### G — `POST /ask` rejected long questions
 
-Tracking the AUTHORED-edge backfill for non-W paper types separately
-from this issue list.
+**Symptom.** Questions past a few thousand characters were refused.
 
-## Closed (fixed 2026-05-22)
+**Affected.** Server < 0.6.x.
 
-### G — `POST /ask` `question` was hard-capped at 4000 characters
+**Status.** Fixed; the ceiling is far higher and the error message states
+it. Long questions still cost tokens — trim for cost, not for the limit.
 
-Pydantic `AskRequest.question` had `max_length=4000`. Tripped when
-packing 24 paper-id batches plus context into one prompt during the
-blockchain timeline scenario. Raised to `max_length=32000` (~8k tokens
-of question, still well under the internal LLM's input budget after
-system prompt + tools + retrieval). Sanity-tested with a 5513-char
-question → 200 OK + answer.
+### A — `/me/profile` answered without authentication
 
-### A — `/me/profile` was unauthenticated
+**Symptom.** The endpoint returned data with no valid key.
 
-Route was bound to the raw `build_profile_snapshot(user_id: str)`
-helper; no `Depends(...)` meant any bearer key could read any
-user_id's profile. Fixed by binding to `get_profile(identity)`.
+**Affected.** Server < 0.5.1.
 
-### B — `/papers/by-doi/{doi}` and `/papers/by-arxiv/{id}` both 500
+**Status.** Fixed 2026-05-22. Every `/me/*` endpoint now requires a key
+carrying the matching scope. On an older self-hosted build, upgrade —
+this is the one worth upgrading for.
 
-Handlers called `get_paper(row["external_id"], identity)`, but
-`get_paper(paper_id, include, identity)` has `include` in second
-position — so `identity` was treated as `include` and
-`identity.split(",")` raised. Fixed by passing `include=None,
-identity=identity` as keyword args.
+### B — `/papers/by-doi/{doi}` and `/papers/by-arxiv/{id}` returned 500
 
-## Withdrawn (was misdiagnosis, not a bug)
+**Symptom.** 500 instead of a paper or a clean 404.
 
-### C (withdrawn) — "/papers/{id}/authors returns 404 for every paper"
+**Affected.** Server < 0.5.1.
 
-The original repro was on 5 paper ids spanning `arxiv:`, `W…`, and
-journal-stub formats — all returned 404. Subsequent test on `W4416083181`
-returned the full 20-author list with ids, ORCIDs, and positions. The
-v1 handler is correct; AUTHORED edges just aren't populated in AGE for
-`arxiv:` and journal-stub paper id types. Tracking this as data-state
-issue D above.
+**Status.** Fixed. Both are superseded by `GET /papers/resolve?id=…`,
+which accepts any identifier shape and reports `resolved_by` — prefer it
+in new code.
 
-### E (withdrawn) — "`/authors?q=` returns null author_id for every row"
+## Withdrawn (misdiagnosis, kept so the ids stay stable)
 
-Misdiagnosis caused by the original CLI script using the wrong jq key
-(`author_id` instead of `id`). The API returns a non-nullable `id`
-field with real A-IDs (e.g. `A5086198262` for the famous Yoshua Bengio).
-Verified by direct curl + raw response inspection.
-
-### F (withdrawn) — "find_papers_by_authors returns unrelated papers"
-
-The LLM tool's `find_papers_by_authors` uses the same `(a:Author)-[:AUTHORED]->(p:Paper)`
-Cypher as the REST endpoint. The returned papers really are linked to
-the given A-IDs in OpenAlex — but OpenAlex's per-author paper
-attribution is imperfect, so the famous Bengio's A-id (A5086198262)
-links to only 55 papers spanning HVAC datasets, antibacterial compounds,
-Li-ion cathodes, and the consciousness paper, instead of his deep-learning
-canon. Not a paperdaily bug.
+- **C** — "`/papers/{id}/authors` 404s for every paper": it 404s only for
+  id types that have no author edges; see D.
+- **E** — "`/authors?q=` returns null author_id for every row": the field
+  is `id`, not `author_id`.
+- **F** — "`find_papers_by_authors` returns unrelated papers": upstream
+  author attribution is imperfect for common names; disambiguate to one
+  `A…` id first.

@@ -1,0 +1,19 @@
+# Research artifacts produced by paperdaily-deep-research. These hold
+# fetched PDFs, private notes and your research questions — never commit
+# them, and never let a stray `git add .` sweep them in.
+pd-research/
+**/pdfs/
+fetch_report.jsonl
+*.part
+
+# Credentials / local config
+.env
+.env.*
+.paperdaily-cli/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# macOS
+.DS_Store

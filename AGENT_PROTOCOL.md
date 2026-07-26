@@ -1,7 +1,7 @@
 # Paperdaily Agent 协议（Protocol v1）
 
 > **Status**: ①②④⑦章随 0.8.0 定稿（2026-07-26）；③⑤章随 A1 定稿（2026-07-26，0.8.x 第二批，端点上线前字段名以 OpenAPI 为准）；⑥⑧持续演进。
-> **定位**: 本地 agent（用户侧 Claude + skills）↔ paperdaily 服务端的**对外契约单一呈现层**。设计权威在 paperdaily 服务端内部设计文档（未随本仓库公开）；本文是契约呈现层，示例层见 `docs/quickstart-zh.md`。冲突时以服务端实际行为与 OpenAPI 为准。
+> **定位**: 本地 agent（用户侧 Claude + skills）↔ paperdaily 服务端的**对外契约单一呈现层**。本文是契约的权威呈现；`quickstart-zh.md` 是示例层，与本文冲突时以本文为准。服务端行为以运行版本的 OpenAPI 为准。
 > **心智模型**: 车间与总控室——agent（车间，多实例）做认知与授权全文；服务端（总控室，单实例）做记忆、图谱、路由。分析真相在服务端，原文真相在本地。
 
 ## 1. 身份与授权
@@ -57,7 +57,7 @@
 - **禁止件（硬性）**：PDF/任何二进制/base64 内嵌 —— 服务端拒收；原文永留本地（版权红线）。引文以短句为限。
 - **上限（定稿）**：papers ≤100 / 单篇 note_md ≤64KB / claims ≤200 / report_md ≤2MB / 单条 evidence.quote ≤500 字符；超限 413/422。
 - **回读**：`GET /api/v1/me/reading-sessions`、`GET /api/v1/me/reading-sessions/{id}`（`read:reading`）；web 回看 `https://www.paperdaily.org/workbench?tab=reading&s=<id>`。
-- **质量语义**：服务端不做真伪裁决；不过质量门（notes 字段完整度、claims evidence 非空率）的上传**可存但标 unverified、不计积分**。参考客户端 gate 见 `paperdaily-deep-research/scripts/upload_session.py`（evidence 非空率 ≥80% 等）。
+- **质量语义**：服务端不做真伪裁决；不过质量门（notes 字段完整度、claims evidence 非空率）的上传**可存但标 unverified、不计积分**。参考客户端 gate 见 `skills/paperdaily-deep-research/scripts/upload_session.py`（evidence 非空率 ≥80% 等）。
 - 上传是**用户显式同意后的独立动作**——skill 不得静默上传（见 SKILL_SPEC 同意点条款）。
 
 ## 5. 任务协议（agent 收件箱）——A1 定稿
@@ -69,7 +69,7 @@
 - **完结回链**：`POST /me/reading-sessions` payload 可带可选 `task_id`，响应新增 `task_linked: bool`。`true` = 任务标 done 并回链 `result_session_id`；`false` = task_id 不存在/不属于你/已完结——**session 本身照常入库**，回链失败不连坐上传。
 - **幂等**：入队侧由服务端保证——同 kind + **同 payload** 的 open 态任务不重复入队（幂等键 = md5(payload)，口径顺序敏感：`deep_read` 的 paper_ids 顺序即语义，首篇=种子，同组乱序视为不同任务；`answer_question` 同理，键 = question_id + 同序 seed_paper_ids）；agent 对同一任务不重复加工（列表里见过、claim 过或已回链的不再做）。
 - kind：`deep_read`（A1，`payload:{paper_ids[], note?}`——paper_ids 作深读种子，skill 侧第一篇当 `--paper` 种子、其余并入 worklist）、`answer_question`（**A2 起启用**，`payload:{question_id, seed_paper_ids[]}`——`question_id` 指向用户的一条 reading question，其问题文本即研究目标（问题原文经 `GET /api/v1/me/questions/{question_id}`（`read:reading`）获取，见上方端点行）；`seed_paper_ids` 首篇作种子、其余并入 worklist；任务可由**服务端问题值班自动生成**（question_leads 命中）或**用户在 web 从线索卡下单**）。
-- 参考客户端：`paperdaily-deep-research/scripts/pd_inbox.sh`（列取/领取，缺 scope 软降级）+ `upload_session.py --task-id`（完结回链）。
+- 参考客户端：`skills/paperdaily-deep-research/scripts/pd_inbox.sh`（列取/领取，缺 scope 软降级）+ `upload_session.py --task-id`（完结回链）。
 
 ## 6. 行为规范
 
@@ -87,5 +87,5 @@
 ## 8. 版本化
 
 - 协议版本随本文头部演进（v1 起）；服务端版本经 `GET /api/version`。
-- 兼容承诺：v1 端点 additive-only；破坏性变更先入 `V1_KNOWN_ISSUES.md` 立案并在本文标注迁移窗口。
-- skill 兼容矩阵见 `SKILL_SPEC.md` §10。
+- 兼容承诺：v1 端点 additive-only；破坏性变更先在已知问题清单立案，并在本文标注迁移窗口。
+- skill 兼容矩阵见 `SKILL_SPEC.md` 文末。

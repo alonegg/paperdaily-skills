@@ -2,13 +2,13 @@
 
 [paperdaily](https://www.paperdaily.org) 是一个"重后端、轻前端"的每日论文系统：把论文流入知识图谱，按你的兴趣画像做每日 4 层推荐，并提供可编程的 v1 API。本仓库是它的公开 Claude Code skills 与 agent 协议文档。
 
-> **English.** This repository ships the public Claude Code skills and agent-protocol docs for [paperdaily](https://www.paperdaily.org), a daily research-paper recommendation platform with a knowledge-graph backend and a bearer-key v1 API. Two skills are included: `paperdaily` (thin read-only query CLI: field digests, author lookups, watchlists) and `paperdaily-deep-research` (a three-stage pipeline that goes from a research field or a single seed paper to a citation-grounded literature review — platform retrieval, local open-access full-text fetching, and agent-team deep reading/synthesis, with optional upload of your own analysis back to the paperdaily workbench). All full-text fetching is OA-first, institutional access is strictly opt-in, downloaded PDFs never leave your machine, and nothing here touches Sci-Hub.
+> **English.** This repository ships the public Claude Code skills and agent-protocol docs for [paperdaily](https://www.paperdaily.org), a daily research-paper recommendation platform with a knowledge-graph backend and a bearer-key v1 API. Two skills are included: `paperdaily` (thin query CLI: field digests, author lookups, and watchlist management — queries are read-only, watchlist create/delete/run are writes and always ask you first) and `paperdaily-deep-research` (a three-stage pipeline that goes from a research field or a single seed paper to a citation-grounded literature review — platform retrieval, local open-access full-text fetching, and agent-team deep reading/synthesis, with optional upload of your own analysis back to the paperdaily workbench). All full-text fetching is OA-first, institutional access is strictly opt-in, downloaded PDFs never leave your machine, and nothing here touches Sci-Hub.
 
 ## Skills 清单
 
 | 目录 | 用途 |
 |---|---|
-| [`paperdaily/`](paperdaily/) | thin 查询 skill：领域/学科/话题日报、作者近作、watchlist 周追踪。只读，不改画像。 |
+| [`paperdaily/`](paperdaily/) | thin 查询 skill：领域/学科/话题日报、作者近作、watchlist 周追踪。查询只读；watchlist 的 create/delete/run 是写操作，调用前必征得你同意（需 `write:profile`，按需索取）。 |
 | [`paperdaily-deep-research/`](paperdaily-deep-research/) | 深度调研 skill：从「一个领域 / 一篇种子论文」到「可溯源的深度文献综述」——平台检索推荐 → 本地 OA 全文瀑布下载 → agent team 逐篇精读 + 跨篇综合；可选把你自己的分析产物回传 paperdaily 工作台。 |
 
 配套文档：

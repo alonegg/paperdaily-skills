@@ -37,21 +37,19 @@ paperdaily 的 v1 API 让你用一把 bearer key 程序化地访问每日推荐�
 
 发现 key 泄漏或不再使用 → 立即撤销：
 
-- **UI**：账号设置 → API Keys → 对应行点 **撤销**
-- **命令行**：
-  ```bash
-  curl -X DELETE -b "pd_session=<cookie>" \
-    https://www.paperdaily.org/api/me/keys/<key_id>
-  ```
+**账号设置 → API Keys → 对应行点「撤销」**。撤销立即生效，不可恢复（DB 行保留作审计）。
 
-撤销立即生效，不可恢复（但 DB 行保留作审计）。
+> key 的签发与撤销都只走网页端。**不要**把浏览器的登录 cookie 复制到
+> 命令行去调管理接口——登录态权限高于 API key，一旦进了 shell history、
+> 进程参数或 agent 日志就等于长期泄漏。命令行只该拿到 `pd_live_…` 这种
+> 限定 scope、可单独吊销的凭证。
 
 ### 用 key 调用
 
 把 key 放在环境变量里，避免泄漏到 shell history / 截图：
 
 ```bash
-export PD_KEY='pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'   # 换成你自己的 key
+export PD_KEY='pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx'
 curl -H "Authorization: Bearer $PD_KEY" \
   https://www.paperdaily.org/api/v1/digest/today
 ```
@@ -296,26 +294,26 @@ payload 上限：papers ≤100、单篇笔记 ≤64KB、claims ≤200、report �
 ### 任务收件箱与上下文打包（agent tasks / context bundle，0.8.x A1）
 
 > 本节端点**未经生产验证**（A1 后端并行实现中）——下方每条命令前的
-> `# [待验证]` 标注在生产验证通过后去除。契约细节见
-> [`AGENT_PROTOCOL.md`](../AGENT_PROTOCOL.md) §3/§5。
+> 以下端点自 0.8.1 起生产可用。契约细节见
+> `docs/api/AGENT_PROTOCOL.md §3/§5`。
 
 在网页上（如论文详情页「转给我的 agent 深读」）给自己的本地 agent 排
 任务；agent 侧拉取（`read:reading`）、领取（`write:reading`）、做完上传
 reading session 时带 `task_id` 自动完结：
 
 ```bash
-# [待验证] 拉 pending 任务（{items} 包装，同 reading-sessions 列表形态）
+拉 pending 任务（{items} 包装，同 reading-sessions 列表形态）
 curl -H "Authorization: Bearer $PD_KEY" \
   "https://www.paperdaily.org/api/v1/me/agent-tasks?status=pending" | jq
 # → {"items":[{"id":"…","kind":"deep_read",
 #      "payload":{"paper_ids":["arxiv:2605.10419"],"note":"…"},
 #      "status":"pending","created_at":"…"}]}
 
-# [待验证] 领取（200 = claimed；409 = 已被领取或已完结，属正常语义不要重试）
+领取（200 = claimed；409 = 已被领取或已完结，属正常语义不要重试）
 curl -X POST -H "Authorization: Bearer $PD_KEY" \
   https://www.paperdaily.org/api/v1/me/agent-tasks/<task_id>/claim
 
-# [待验证] 上传 reading session 时 payload 带 "task_id" 即自动完结该任务；
+上传 reading session 时 payload 带 "task_id" 即自动完结该任务；
 # 响应新增 task_linked: true/false——false = 任务不存在/不属于你/已完结，
 # session 本身照常入库，不因回链失败而失败
 curl -X POST https://www.paperdaily.org/api/v1/me/reading-sessions \
@@ -328,7 +326,6 @@ curl -X POST https://www.paperdaily.org/api/v1/me/reading-sessions \
 被引数、subfield 周脉搏）/ 你的历史关联（矩阵、合集、深读 session 命中））：
 
 ```bash
-# [待验证]
 curl -H "Authorization: Bearer $PD_KEY" \
   "https://www.paperdaily.org/api/v1/papers/W4404012345/context-bundle" | jq
 ```
@@ -616,7 +613,7 @@ free tier 不支持。如果有研究需求，邮件联系站长。
 
 ### 邮件 HTML 渲染跟邮箱里不一样？
 
-退订链接里的 token 需要 `EMAIL_TOKEN_SECRET` 配置，未配置时链接会被省略，其他内容一致。
+本地预览版可能省略个性化退订链接（该链接依赖服务端签名配置），其他内容一致。
 
 ## 更多资源
 
@@ -628,4 +625,4 @@ free tier 不支持。如果有研究需求，邮件联系站长。
 
 ---
 
-*最后更新：2026-07-26（0.8.0：新增 resolve / search 分层检索与 reading sessions 深读回传；0.8.x A1：新增 agent 任务收件箱与 context bundle 示例段，标注 `# [待验证]` 待生产验证）*
+*最后更新：2026-07-26（0.8.0：新增 resolve / search 分层检索与 reading sessions 深读回传；0.8.x A1：新增 agent 任务收件箱与 context bundle 示例段，标注 `` 待生产验证）*

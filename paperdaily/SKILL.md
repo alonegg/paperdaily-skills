@@ -1,12 +1,26 @@
 ---
 name: paperdaily
-description: Query the user's paperdaily research-paper service from the shell. Use when the user wants the latest academic papers in a research field (e.g. "AI 今天有什么新论文", "show me recent finance papers"), asks about a specific researcher's recent work (e.g. "Bengio 最近发了啥"), wants paper recommendations with related-paper expansion, or asks for an LLM-synthesized digest of a research area. Routes through ~/.paperdaily-cli/env (PD_BASE + PD_KEY); read-only against /api/v1, will never modify the user's profile (follows/feedback) without explicit re-confirmation.
+description: Query the user's paperdaily research-paper service from the shell. Use when the user wants the latest academic papers in a research field (e.g. "AI 今天有什么新论文", "show me recent finance papers"), asks about a specific researcher's recent work (e.g. "Bengio 最近发了啥"), wants paper recommendations with related-paper expansion, or asks for an LLM-synthesized digest of a research area. Routes through ~/.paperdaily-cli/env (PD_BASE + PD_KEY). Query scenarios are read-only; the watchlist scenario writes (create/delete/run) and every write asks the user first.
 ---
 
 # paperdaily skill
 
-Thin wrapper over the paperdaily v1 Bearer API. Two end-user scenarios
-implemented; both are read-only.
+> **声明块（SKILL_SPEC §1）**
+> - **skill_ver**: `0.2.0`
+> - **协议版本**: AGENT_PROTOCOL v1
+> - **所需 scopes**: `read:digest, read:paper, synth:ask`（默认，只读）；
+>   scenario 3 watchlist 的 create/delete/run 另需 `write:profile`，
+>   **按需索取、每次动作前显式确认**
+
+Thin wrapper over the paperdaily v1 Bearer API.
+
+**Read vs write (read this before acting).** Three scenarios are pure
+queries — field digest, author papers, topic find. The fourth, watchlist,
+**mutates server state**: `create` and `delete` change the user's saved
+queries, and `run` triggers a scan that writes `watchlist_entries` and
+spends quota. Per `SKILL_SPEC.md` rule 4 every one of those three needs an
+explicit user OK first — "run is basically read-only" is not a valid excuse
+(it was written that way once; it was wrong).
 
 ## Pre-flight (do once per environment)
 
@@ -14,13 +28,22 @@ The skill expects `~/.paperdaily-cli/env` with:
 
 ```sh
 export PD_BASE="${PD_BASE:-https://www.paperdaily.org/api/v1}"
-export PD_KEY="pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"   # placeholder — issue yours at /account
+export PD_KEY="pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 ```
 
 If the file is missing, **stop and tell the user to issue a key first**
-(web UI → Settings → API keys → Issue key, scopes
-`read:digest,read:paper,write:profile,synth:ask`). Don't try to mint
-one — that needs cookie session, this skill is bearer-only.
+(web UI → Settings → API keys → Issue key). Ask for the **read-only** set
+by default:
+
+```
+read:digest,read:paper,synth:ask
+```
+
+`write:profile` is **not** part of the default ask — request it
+just-in-time, only when the user actually wants to create/delete/run a
+watchlist, and say why. A key that can only read cannot be talked into
+writing. Don't try to mint a key here — that needs a cookie session, this
+skill is bearer-only.
 
 Verify reachability with a one-shot smoke before doing anything heavy:
 
@@ -29,8 +52,10 @@ source ~/.paperdaily-cli/env
 curl -sS -o /dev/null -w "%{http_code}\n" "$PD_BASE/openapi.json"   # expect 200
 ```
 
-`PD_BASE` should point at the public host:
-`https://www.paperdaily.org/api/v1`.
+Use `https://www.paperdaily.org/api/v1` unless you run your own instance.
+If every call comes back as a 302 to a login page, the deployment has an
+access proxy in front of `/api/v1/*` — that's a server-side setting, ask
+the operator.
 
 ## Scenarios
 
@@ -85,13 +110,13 @@ Cost guidance:
 - without `--no-synth`: 1 `/ask` call, typically ~3-12k input + ~500-1k
   output tokens. Free tier rate cap is 2/min so back-to-back invocations
   may 429.
-- with `--no-synth`: pure REST, typically sub-second per call, no
+- with `--no-synth`: pure REST, sub-second on internal endpoint, no
   token cost.
 
 If the user asks for multiple fields in one session, default to `--no-synth`
 for all but the most important one to stay under the rate cap.
 
-### 3 — Watchlists (user-defined weekly topic tracking)
+### 3 — Watchlists (user-defined weekly topic tracking) — **WRITE scenario**
 
 The user says "建一个 watchlist 追 blockchain governance 论文", "看看
 我的 watchlist 有什么新的", "停掉那个 GAN watchlist".
@@ -111,17 +136,22 @@ The user says "建一个 watchlist 追 blockchain governance 论文", "看看
 What it does:
 
 - Stores a saved query (terms ∪ arxiv categories ∪ anchor paper neighbors)
-  with a scoring rubric (default v0.1).
+  with a scoring rubric (rubric version is returned by the API).
 - The weekly cron (Mon 08:00 Asia/Shanghai) scans all active watchlists,
   scores each candidate paper into high/med/low threat tier per the
   rubric, writes `watchlist_entries`, and emails a weekly digest.
-- v0.1 author-dogfood only; v0.2 will GA at ≤5 watchlists/user.
+- Server-side cap: ≤5 watchlists per user.
 
 Hard rules:
-- This scenario uses `write:profile` scope, but it CREATES watchlists
-  (mutates state). Confirm with the user before calling `create` or
-  `delete`. `run` is mostly safe (read-only retrieval + write to
-  watchlist_entries which is an append-only hit ledger).
+- **`create`, `delete` AND `run` all need an explicit user OK before the
+  call** — they need `write:profile` and each one changes server state.
+  `run` is not an exception: it writes `watchlist_entries` and consumes
+  scan quota. (An earlier version of this file called `run` "mostly
+  safe". That was wrong and contradicted `SKILL_SPEC.md` rule 4.)
+- `list`, `show` and `entries` are pure reads — no confirmation needed.
+- If the key lacks `write:profile`, do NOT push the user to re-issue a
+  broader key mid-flow as if it were a bug: say which action needs it,
+  and let them decide.
 - `run` is synchronous and can take 10-60s. Show a spinner if rendering
   to a TTY; agents should treat it as a long-poll call.
 - `anchor_paper_ids` need to be **W- or arxiv: paper IDs that have a
@@ -161,11 +191,12 @@ Flags: `--limit N` (default 8), `--all-matches`, `--synth`.
 
 ## What this skill does NOT do
 
-- **Mutate the user's profile** (follow topic, follow author, post
-  feedback). All `POST /me/*` calls require `write:profile` scope which
-  the skill does not exercise. If the user explicitly says "follow this
-  topic for me", run the command directly with `curl` and a manual scope
-  check — do NOT add a write helper to this skill.
+- **Mutate the user's interest profile** (follow topic, follow author,
+  post feedback). Those `POST /me/*` calls also sit under `write:profile`,
+  but this skill ships no helper for them. If the user explicitly says
+  "follow this topic for me", run the call directly with `curl` after
+  confirming — do NOT add a write helper here. (Watchlist management is
+  the one write surface this skill does implement; see scenario 3.)
 - **Manage API keys.** Issuance / revocation goes through the cookie
   session at `/api/me/keys`. Tell the user to use the web UI.
 - **Touch the cookie-session `/api/*` paths.** Different auth, different
@@ -177,14 +208,24 @@ Flags: `--limit N` (default 8), `--all-matches`, `--synth`.
 
 When a scenario surfaces something that looks like an API bug:
 
-1. **Don't fix it.** This skill is read-only; backend fixes live in the
-   paperdaily server, which is not part of this repository.
-2. **Record the symptom.** Capture: request URL, HTTP code, response
-   body excerpt, repro count (how many paper_ids / author names this
-   pattern affects). Add to `references/v1-known-issues.md` as a new
-   entry with a stable letter id (current taxonomy goes A→F).
-3. **Surface to the user.** Tell them you saw the bug and where it's
-   tracked. Don't bury it in the output.
+1. **Don't fix it.** Backend fixes live in the paperdaily server, which
+   is not part of this package. Don't go hunting for that tree unless
+   the user asks for a fix.
+2. **Record the symptom — outside the install directory.** Append to
+   `~/.paperdaily-cli/bug-reports/<YYYY-MM-DD>.md`, creating it if
+   needed. **Never write into this skill's own directory**: it is a
+   shared/installed package (often a git checkout), and notes written
+   there get committed by accident.
+3. **Redact before writing.** Record the request path, the HTTP code,
+   the affected id(s), and a ≤200-char body excerpt — with the
+   following stripped: `Authorization` / `Cookie` headers, any
+   `pd_live_…` string, email addresses, and any user-private research
+   content. If you cannot redact it confidently, describe it instead of
+   pasting it.
+4. **Surface to the user.** Tell them what you saw and where you wrote
+   it. Don't bury it in the output. For a suspected *security* problem,
+   stop and follow `SECURITY.md` (private report) rather than writing a
+   public issue.
 
 Currently tracked open issue:
 
@@ -205,5 +246,7 @@ Currently tracked open issue:
   (helper used by field-digest's slow path; also runnable standalone
   to discover Topic ids).
 - `scenarios/watchlist.sh` — CRUD + run-now for user-defined weekly
-  topic-tracking jobs. Mutates state — see the hard rules in scenario 3.
-- `references/v1-known-issues.md` — bugs we've seen, by stable letter id.
+  topic-tracking jobs. Mutates state — see the
+  hard rules in scenario 3.
+- `references/v1-known-issues.md` — user-visible issues + workarounds, by
+  stable letter id.

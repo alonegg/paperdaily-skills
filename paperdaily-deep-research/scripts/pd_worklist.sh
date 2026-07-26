@@ -75,7 +75,7 @@ if [[ -z "${PD_KEY:-}" || -z "${PD_BASE:-}" ]]; then
 pd_worklist.sh: missing PD_BASE / PD_KEY.
 
 Create ~/.paperdaily-cli/env with:
-  export PD_BASE="https://www.paperdaily.org/api/v1"
+  export PD_BASE="http://<your-paperdaily-host>/api/v1"
   export PD_KEY="pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
 No key yet? Issue one from the paperdaily web UI:
@@ -380,7 +380,7 @@ while IFS=$'\t' read -r pid src; do
     echo "pd_worklist.sh: warning: detail-fetch failed for $pid, skipping" >&2
   else
     # paperdaily's paper_etl writes several missing string attrs as "" not
-    # JSON null (known gotcha — see repo memory empty_string_in_attrs);
+    # JSON null (the API has historically returned "" for absent fields);
     # normalize "" -> null here so the worklist honors "null not empty string".
     printf '%s' "$detail_json" | jq -c --arg source "$src" '
       def blank_to_null: if . == "" or . == null then null else . end;

@@ -31,10 +31,18 @@ jobs:
         run: |
           set -e
           # Real keys, private keys, and internal hosts must never land here.
-          # pd_live_ placeholders are all-x or all-CAPS by convention, so a
-          # mixed-case 20+ body is the tell.
+          #
+          # Deliberately NO blanket `pd_live_…{20,}` pattern. It was here until
+          # 2026-08-05 with the comment "placeholders are all-x, so a mixed-case
+          # 20+ body is the tell" — but `[A-Za-z0-9_-]{20,}` matches all-x too,
+          # so it flagged the 32-x placeholder that every setup snippet has to
+          # show. This job had therefore failed on every publish since the repo
+          # was created, while the local gate (scripts/publish_skills.sh, which
+          # never had the pattern) stayed green — a red CI nobody could act on.
+          # Real-key detection is the enumerate-and-verify check below: it walks
+          # every pd_live_ literal in the tree and demands each be a recognised
+          # placeholder shape, which is strictly stronger than any regex here.
           patterns=(
-            'pd_live_[A-Za-z0-9_-]{20,}'
             'BEGIN [A-Z ]*PRIVATE KEY'
             '10\.6\.64\.[0-9]+'
             '192\.168\.78\.[0-9]+'

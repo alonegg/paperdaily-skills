@@ -98,6 +98,23 @@ pd_api() {
   printf '%s' "$code"
 }
 
+# URL-encode one path segment. Task ids are server-minted token_urlsafe(9)
+# (already path-safe), but the id reaches this script through the agent, and
+# an agent's input can be steered by whatever it just read. Splicing it into
+# a path raw would let `?`/`#`/`../` rewrite which endpoint gets called with
+# the bearer key attached. Cheap to encode, so encode. (2026-07-27 review.)
+urlenc() {
+  local s=$1 out="" i c
+  for (( i = 0; i < ${#s}; i++ )); do
+    c=${s:i:1}
+    case "$c" in
+      [a-zA-Z0-9._~-]) out+="$c" ;;
+      *) out+=$(printf '%%%02X' "'$c") ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
 dump_body() {
   # first 400 bytes of the response body, indented, to stderr
   head -c 400 "$BODY_FILE" | sed -e 's/^/  /' >&2 || true
@@ -118,7 +135,7 @@ EOF
 
 # ── 3. claim mode ────────────────────────────────────────────────────
 if [[ "$MODE" == "claim" ]]; then
-  code=$(pd_api POST "/me/agent-tasks/${CLAIM_ID}/claim")
+  code=$(pd_api POST "/me/agent-tasks/$(urlenc "$CLAIM_ID")/claim")
   case "$code" in
     200)
       echo "pd_inbox.sh: claimed task ${CLAIM_ID}"

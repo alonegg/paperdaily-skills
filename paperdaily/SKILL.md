@@ -1,6 +1,6 @@
 ---
 name: paperdaily
-description: Query the user's paperdaily research-paper service from the shell. Use when the user wants the latest academic papers in a research field (e.g. "AI 今天有什么新论文", "show me recent finance papers"), asks about a specific researcher's recent work (e.g. "Bengio 最近发了啥"), wants paper recommendations with related-paper expansion, or asks for an LLM-synthesized digest of a research area. Routes through ~/.paperdaily-cli/env (PD_BASE + PD_KEY). Query scenarios are read-only; the watchlist scenario writes (create/delete/run) and every write asks the user first.
+description: Query the user's paperdaily research-paper service from the shell — fast, read-only lookups that answer in one shot. Use when the user wants the latest academic papers in a research field (e.g. "AI 今天有什么新论文", "show me recent finance papers"), asks about a specific researcher's recent work (e.g. "Bengio 最近发了啥"), wants paper recommendations with related-paper expansion, or asks for an LLM-synthesized digest of a research area. Not for deep reading: if the user wants the papers actually downloaded and read — 深度调研 / 精读 / a literature review with page-anchored citations, or "深读这篇论文" — use the `paperdaily-deep-research` skill instead, which runs the full fetch-and-read pipeline. Routes through ~/.paperdaily-cli/env (PD_BASE + PD_KEY). Query scenarios are read-only; the watchlist scenario writes (create/delete/run) and every write asks the user first.
 ---
 
 # paperdaily skill
@@ -9,6 +9,8 @@ description: Query the user's paperdaily research-paper service from the shell. 
 > - **skill_ver**: `0.2.0`
 > - **协议版本**: AGENT_PROTOCOL v1
 > - **所需 scopes**: `read:digest, read:paper, synth:ask`（默认，只读）；
+>   读用户收藏库（`GET /me/saves`）另需 `read:contrib`（个人数据，
+>   刻意不并入人手一份的 `read:paper`）；
 >   scenario 3 watchlist 的 create/delete/run 另需 `write:profile`，
 >   **按需索取、每次动作前显式确认**
 
@@ -38,6 +40,12 @@ by default:
 ```
 read:digest,read:paper,synth:ask
 ```
+
+要读「用户收藏了哪些论文」再加 `read:contrib`。**收藏库只能从
+`GET /me/saves` 读**——不要拿 `GET /me/feedback`（行为流水）反推：流水只记
+经反馈路径产生的动作，用户在库页直接点收藏的论文根本不在里面，反推出来的
+清单会系统性偏少（实地案例：库里 20 篇、反推只得 6 篇）。旧 key 没勾
+`read:contrib` 会 403，让用户重签一把。
 
 `write:profile` is **not** part of the default ask — request it
 just-in-time, only when the user actually wants to create/delete/run a

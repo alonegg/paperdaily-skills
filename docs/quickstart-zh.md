@@ -433,13 +433,24 @@ for pid in ["W4404012345", "W4404012346", "W4404012347"]:
 | Scope | 用途 | 默认勾选 |
 |---|---|---|
 | `read:digest` | 拉日报（`/digest/*`） | ✅ |
-| `read:paper` | 单篇详情 + 相似 + resolve/search 检索（`/papers/*`） | ✅ |
+| `read:paper` | 单篇详情 + 相似 + resolve/search 检索（`/papers/*`）——**全库语料**，不含你的个人数据 | ✅ |
+| `read:contrib` | 读**你自己的**收藏库与阅读状态（`GET /me/saves`、`/contrib/read-state`，0.8.6） | ✅ |
+| `write:contrib` | 回传阅读行为（`/contrib/read-events`，桌面/阅读器客户端用） | ✅ |
 | `write:profile` | 改兴趣画像（`/me/topics`, `/me/authors`, `/me/feedback`） | ✅ |
 | `synth:ask` | LLM 综合提问（`/ask`） | ❌ 需手动勾 |
 | `read:reading` | 深读 session 回读（`GET /me/reading-sessions*`，0.8.0） | ✅ |
 | `write:reading` | 深读产物上传（`POST /me/reading-sessions`，0.8.0） | ❌ 需手动勾 |
 
 > `synth:ask` 默认不勾是因为每次调用都触发后端 LLM token 消耗；`write:reading` 默认不勾是因为它是写操作——agent 上传你的分析前必须经你显式同意，key 层面同样要求显式授权。如果你确认要用，可以单独建一把仅带对应 scope 的 key，便于追踪。
+>
+> **改已有 key 的权限**（0.8.8）：不必撤旧建新。`PATCH /api/me/keys/{id}` 传
+> `{"scopes": [...]}`（web 端在 key 列表行上点「改权限」），**明文不变**——已经
+> 在用它的脚本 / agent 不用改配置。缩小权限随时安全；**扩大权限意味着那串已经
+> 分发出去的 key 当场获得新能力**，如果你不确定它是否仍只在你手上，应该撤销后
+> 新建一把。改动会记 `scopes_updated_at`，列表里显示「权限于 X 修改过」。已撤销
+> 的 key 不可编辑（404）。
+>
+> **`read:paper` 与 `read:contrib` 的分界**：前者是**语料**（人手一份，任何 key 都该有），后者是**个人数据**（你收藏了什么，说明你在做什么）。收藏库读回刻意没有并进 `read:paper`——那等于给所有已发出的 key 静默扩权。所以想让 agent 看到你的收藏，必须显式勾 `read:contrib`；0.8.6 之前签发的 key 没有它，调 `/me/saves` 会 403，重签一把即可。
 
 ## 端点速查
 
@@ -461,6 +472,22 @@ for pid in ["W4404012345", "W4404012346", "W4404012347"]:
 | GET | `/papers/{id}/similar?k=20` | 相似邻居（向量召回） |
 | GET | `/papers/resolve?id=` | 任意标识符直达（0.8.0；`resolved_by` 标注，404=未收录） |
 | GET | `/papers/search?q=&mode=auto` | 分层检索：标识符→标题→语义瀑布（0.8.0；`match_layer`/`layer_used`） |
+
+### 你的收藏库（`read:contrib`，0.8.6）
+
+| 方法 | 路径 | 用途 |
+|---|---|---|
+| GET | `/me/saves?limit=` | 你收藏的论文（`{"items":[...], "total":N}`，默认 100 / 上限 500） |
+
+每条带 `paper_id` / `title` / `publication_date` / `doi` / `venue_name` /
+`venue_badges` / `tldr_zh`，与网页「已保存」页同一份数据同一套字段——拿到即用，
+不必再逐篇打 `/papers/{id}`。按发表日期倒序（**不是收藏时间**：底层 `SAVED`
+边不带时间戳）。
+
+> **要「用户收藏了什么」就读这个端点，不要从 `/me/feedback` 反推。** feedback
+> 是行为流水，只记录经反馈路径产生的动作；在网页「已保存」里直接点收藏的论文
+> 根本不进流水，反推出来的清单会系统性偏少（实地案例：库里 20 篇、反推只得
+> 6 篇）。这个端点 0.8.6 才有，此前反推是唯一能凑合的办法——现在不是了。
 
 ### 深读回传（`read:reading` / `write:reading`，0.8.0）
 

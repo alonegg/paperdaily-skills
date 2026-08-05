@@ -6,9 +6,10 @@
 #
 # Usage:
 #   pd_worklist.sh "<Field name | Field id | 4-digit Subfield id | T-prefixed Topic id | free-text query>" \
-#     [--limit 30] [--year-from YYYY] [--similar 2] [--out DIR] [--no-synth]
+#     [--limit 25] [--year-from YYYY] [--similar 2] [--out DIR] [--no-synth] \
+#     [--throttle 1.05] [--deep-topic-scan] [--append]
 #   pd_worklist.sh --paper <paper id | DOI | arXiv id> \
-#     [--limit 30] [--out DIR] [--no-synth]
+#     [--limit 25] [--out DIR] [--no-synth]
 #
 # Retrieval follows the layered protocol (docs/api/AGENT_PROTOCOL.md §2):
 # facet pool-pulls stay on GET /papers?…_id=, fuzzy text goes to
@@ -21,19 +22,29 @@
 #   - 1-2 digit id (e.g. 17)                → Field
 #   - 4-digit id (e.g. 1702)                → Subfield
 #   - "Field name" / "Subfield name" exact  → Field / Subfield by name
-#   - other string                          → Topic-name scan across all
-#                                              Subfields (~3-5s, parallel walk);
-#                                              still no hit → free-text query via
+#   - other string                          → Topic-name match against the
+#                                              global top-500 Topics by paper
+#                                              count (ONE request); still no hit
+#                                              → free-text query via
 #                                              GET /papers/search?q=&mode=auto
+#     (--deep-topic-scan forces an exhaustive per-Subfield walk for long-tail
+#      Topics outside the top-500: ~250 sequential requests, several minutes,
+#      and it eats the whole read:paper quota. Opt-in for a reason.)
 #
 # --paper single-seed mode: GET /papers/resolve?id= resolves the seed (404 →
 # error with a /papers/search hint), then GET /papers/{id}/similar?k=<limit>
 # expands it into the worklist (seed is the first row; --similar is ignored).
+# NOTE the off-by-one, and that it compounds with twin collapse: --limit sizes
+# the /similar expansion ONLY, so the raw pool is up to limit+1 rows (seed +
+# limit neighbours) — and the collapse pass then REMOVES the twins, typically
+# 20-30% of them on this corpus. Want N distinct works? Over-request: start
+# around --limit $((N * 3 / 2)) and read the "worklist rows written" line, which
+# is the post-collapse count.
 #
 # Examples:
 #   pd_worklist.sh "Artificial Intelligence"
 #   pd_worklist.sh 1702 --limit 20 --year-from 2025
-#   pd_worklist.sh T10270 --similar 3 --out ./research/blockchain
+#   pd_worklist.sh T10270 --similar 2 --out ./research/blockchain
 #   pd_worklist.sh "graph neural networks" --no-synth
 #   pd_worklist.sh --paper arxiv:2605.10419
 #   pd_worklist.sh --paper 10.2139/ssrn.7123198 --limit 20
@@ -41,7 +52,9 @@
 # Output ($OUT, default ./pd-research/<slug of resolved target>/):
 #   worklist.jsonl      — one JSON object per line: id, title, publication_date,
 #                          venue, doi, arxiv_id, oa_url, source
-#                          ("primary"|"similar"|"seed")
+#                          ("primary"|"similar"|"seed"), twins collapsed
+#   worklist.twins.jsonl— audit trail: one line per collapsed twin
+#                          {kind: "hard"|"title", kept, dropped, title}
 #   worklist.meta.json  — provenance sidecar: taxonomy target + created_at
 #                          (consumed by Stage 4 upload_session.py)
 #   overview.md         — LLM synthesis grounded in the worklist via
@@ -51,10 +64,20 @@
 # If missing: issue a key from the paperdaily web UI, Settings → API keys.
 #
 # Scopes needed: read:paper (resolve / search / list / similar / detail),
-# synth:ask (unless --no-synth). Free tier read:paper is 60 req/min — this
-# script paces GET calls ~0.15s apart and retries once on 429, but a large
-# --limit x --similar combo can still legitimately exceed the per-minute cap;
-# a handful of warned skips is expected, not a bug.
+# synth:ask (unless --no-synth).
+#
+# Rate limiting — free tier read:paper is 60 req/min in a FIXED 60s window
+# (api/middleware/api_key_auth.py). Every GET therefore self-paces at
+# --throttle seconds (default 1.05 ≈ 57/min, i.e. below the cap by design),
+# and a 429 is retried up to 3 times honouring the server's Retry-After.
+# An earlier version paced at 0.15s (≈400/min): it blew the quota on any
+# default run and then dropped papers with a one-line warning, quietly
+# shrinking the worklist. Papers that still fail to fetch are now counted
+# and reported as an INCOMPLETE banner — a short worklist must never look
+# like a small field.
+#
+# Wall clock: pacing is the dominant cost. Budget roughly
+# (2 + n_primary + n_merged) x throttle seconds — e.g. ~80s at the defaults.
 #
 # Self-contained: only bash + curl + jq. bash 3.2 (macOS default) compatible.
 
@@ -85,17 +108,31 @@ EOF
 fi
 
 # ── 1. arg parsing ───────────────────────────────────────────────────
-LIMIT=30
+# Defaults size a *candidate pool for triage*, not a reading list: 25 primary
+# x 2 similar neighbours, minus twin collapse, lands around 35-50 distinct
+# works — enough for a human to skim down to the 8-15 that actually get
+# deep-read (SKILL.md Stage 1.5). The pre-0.4.0 30 x 2 defaults produced pools
+# of up to 90 rows, i.e. 90 PDF downloads and 90 reading sub-agents if taken
+# literally, which is nobody's idea of a deep read.
+LIMIT=25
 YEAR_FROM=""
 YEAR_FROM_SET=0
+# --similar must stay >= 2 on this corpus. At k=1 a paper's single nearest
+# neighbour is usually its own twin vertex, which the pool already holds, so
+# the expansion silently contributes nothing ("similar-expanded: 0", measured).
+# Raising k costs no extra REQUESTS — one /similar call per primary either way,
+# only the returned list is longer — so there is no reason to run it at 1.
 SIMILAR=2
 SIMILAR_SET=0
+APPEND=0
 OUT=""
 DO_SYNTH=1
 SEED_PAPER=""
+THROTTLE="${PD_THROTTLE:-1.05}"
+DEEP_TOPIC_SCAN=0
 target_raw=""
 
-print_help() { sed -n '2,59p' "$0"; }
+print_help() { sed -n '2,82p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -104,6 +141,9 @@ while [[ $# -gt 0 ]]; do
     --similar)    SIMILAR=$2; SIMILAR_SET=1; shift 2 ;;
     --paper)      SEED_PAPER=$2; shift 2 ;;
     --out)        OUT=$2; shift 2 ;;
+    --throttle)   THROTTLE=$2; shift 2 ;;
+    --append)     APPEND=1; shift ;;
+    --deep-topic-scan) DEEP_TOPIC_SCAN=1; shift ;;
     --no-synth)   DO_SYNTH=0; shift ;;
     --help|-h)    print_help; exit 0 ;;
     -*)           echo "pd_worklist.sh: unknown flag: $1" >&2; exit 2 ;;
@@ -117,28 +157,50 @@ if [[ -z "$SEED_PAPER" && -z "$target_raw" ]]; then
   echo "usage: pd_worklist.sh <field-or-subfield-or-topic-or-query> [flags]  |  pd_worklist.sh --paper <id> [flags]" >&2; exit 2
 fi
 
-# ── 2. tiny HTTP client (body+status in one request; retry once on 429) ──
+# ── 2. tiny HTTP client (self-paced; 429 → Retry-After backoff, ≤3 tries) ──
+# Every call sleeps $THROTTLE after the response. Command substitution puts
+# pd_api in a subshell, so a "last request time" variable would not survive
+# between calls — sleeping after each request is the one pacing scheme that
+# works regardless, at the cost of adding the request latency on top.
+_HDR_FILE=$(mktemp "${TMPDIR:-/tmp}/pd_worklist_hdr.XXXXXX")
+N_RETRY_WAITS=0   # how many times we sat out a 429 (reported in the summary)
+
+_retry_after_secs() {
+  # Server sends Retry-After = seconds left in the fixed 60s window. Honour it
+  # (a blind 3s backoff retries straight into the same closed window), but cap
+  # it so a misconfigured server cannot park the run forever.
+  local v
+  v=$(tr -d '\r' < "$_HDR_FILE" 2>/dev/null | awk 'tolower($1)=="retry-after:"{print $2}' | tail -1)
+  case "$v" in ''|*[!0-9]*) v=5 ;; esac
+  [[ "$v" -gt 65 ]] && v=65
+  [[ "$v" -lt 1 ]] && v=1
+  printf '%s' "$v"
+}
+
 pd_api() {
   # pd_api METHOD PATH [BODY]  -> prints response body to stdout.
   # Returns 0 on 2xx, 1 otherwise (error detail goes to stderr).
   local method="$1" path="$2" body="${3:-}"
   local url="${PD_BASE}${path}"
-  local raw code out attempt
+  local raw code out attempt wait_s
 
-  for attempt in 1 2; do
+  for attempt in 1 2 3; do
     if [[ -n "$body" ]]; then
-      raw=$(curl -sS -w $'\n%{http_code}' \
+      raw=$(curl -sS -D "$_HDR_FILE" -w $'\n%{http_code}' \
         -H "Authorization: Bearer $PD_KEY" -H 'Content-Type: application/json' \
         -X "$method" -d "$body" "$url")
     else
-      raw=$(curl -sS -w $'\n%{http_code}' \
+      raw=$(curl -sS -D "$_HDR_FILE" -w $'\n%{http_code}' \
         -H "Authorization: Bearer $PD_KEY" -X "$method" "$url")
     fi
     code="${raw##*$'\n'}"
     out="${raw%$'\n'*}"
-    if [[ "$code" == "429" && "$attempt" == "1" ]]; then
-      echo "pd_worklist.sh: 429 on $method $path — backing off 3s, retrying once" >&2
-      sleep 3
+    sleep "$THROTTLE"
+    if [[ "$code" == "429" && "$attempt" -lt 3 ]]; then
+      wait_s=$(_retry_after_secs)
+      echo "pd_worklist.sh: 429 on $method $path — quota window closed, waiting ${wait_s}s (attempt $attempt/3)" >&2
+      N_RETRY_WAITS=$((N_RETRY_WAITS + 1))
+      sleep "$wait_s"
       continue
     fi
     break
@@ -152,6 +214,14 @@ pd_api() {
   return 0
 }
 
+# jq that must not take down the script: an unexpected response shape (an SPA
+# HTML fallback, an error envelope) should read as a clear message, not as a
+# `set -e` abort inside a command substitution.
+json_len() {
+  # json_len <json> <path>  -> array length, or "" when the shape is wrong
+  printf '%s' "$1" | jq -r --arg p "$2" 'getpath($p | split(".")) | if type=="array" then length else empty end' 2>/dev/null
+}
+
 slugify() {
   printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-60
 }
@@ -163,32 +233,79 @@ urlenc() {
 # ── 3. taxonomy resolution (T-id / numeric id / exact name / substring /
 #      topic-name scan — same tiers as the internal skill's field-digest.sh) ──
 
-# Parallel scan of Topic display_names across all Subfields. Self-contained
-# reimplementation of the internal skill's topic-find.sh (can't source it —
-# this script ships standalone). Prints the single best hit (highest
+# Topic-name resolution in two tiers. Prints the best hit (highest
 # paper_count) as a TSV line: id\tpaper_count\tsubfield_id\tdisplay_name
-_pd_scan_subfield_topics() {
-  local sf="$1"
-  curl -sS -H "Authorization: Bearer $PD_KEY" \
-    "$PD_BASE/taxonomy/topics?subfield_id=$sf&limit=200" 2>/dev/null \
-    | jq -r --arg sf "$sf" --arg n "$PD_NEEDLE_LC" '
-        if type == "array" then
-          .[] | select(.display_name | ascii_downcase | contains($n))
-              | [.id, .paper_count, $sf, .display_name] | @tsv
-        else empty end' 2>/dev/null
+#
+# Tier 1 is ONE request against the global Topic listing, which the server
+# returns ordered by paper_count (max limit=500). Tier 2 walks every Subfield
+# and only exists for long-tail Topics below that cut.
+#
+# Tier 2 used to be the *only* tier, and ran as `xargs -P 4` over ~250
+# Subfields with bare curl: it bypassed the retry path, fired ~250 requests
+# into a 60 req/min quota, and swallowed every error with 2>/dev/null — so a
+# throttled scan was indistinguishable from "this Topic does not exist" and
+# silently degraded into a semantic search. Now it is sequential, paced,
+# loud about failures, and opt-in.
+_topic_pick_from_list() {
+  # _topic_pick_from_list <json-array> <needle_lc> [subfield_id]
+  printf '%s' "$1" | jq -r --arg n "$2" --arg sf "${3:-}" '
+      if type == "array" then
+        [.[] | select(.display_name | ascii_downcase | contains($n))]
+        | sort_by(-.paper_count) | .[0] // empty
+        | [.id, .paper_count, (if $sf == "" then (.parent_id // "") else $sf end), .display_name]
+        | @tsv
+      else empty end' 2>/dev/null
 }
 
 topic_find_by_name() {
-  local needle_lc="$1" sf_ids
+  local needle_lc="$1" hit topics sf_ids sf n_scanned n_failed best
+
+  # ── tier 1: global top-500 by paper_count, one request ──
+  topics=$(pd_api GET "/taxonomy/topics?limit=500") || return 1
+  hit=$(_topic_pick_from_list "$topics" "$needle_lc")
+  if [[ -n "$hit" ]]; then printf '%s' "$hit"; return 0; fi
+
+  if [[ "$DEEP_TOPIC_SCAN" != "1" ]]; then
+    cat >&2 <<EOF
+pd_worklist.sh: '$needle_lc' is not among the 500 largest Topics (that cut is by
+  GLOBAL paper count, so even a well-known CS/AI topic can sit below it).
+  Skipping the exhaustive per-Subfield scan — ~250 sequential requests, several
+  minutes, and it spends the whole read:paper minute quota. Falling through to
+  free-text /papers/search, which usually finds these papers anyway.
+  If you specifically need a Topic id for a facet pool-pull: pass a Subfield id
+  instead (4 digits, e.g. 1702), or force the walk with --deep-topic-scan.
+EOF
+    return 1
+  fi
+
+  # ── tier 2: exhaustive, sequential, paced, honest about failures ──
   sf_ids=$(pd_api GET "/taxonomy/subfields") || return 1
   sf_ids=$(printf '%s' "$sf_ids" | jq -r '.[].id')
-
-  export -f _pd_scan_subfield_topics
-  export PD_BASE PD_KEY
-  export PD_NEEDLE_LC="$needle_lc"
-
-  printf '%s\n' "$sf_ids" | xargs -P 4 -I {} bash -c '_pd_scan_subfield_topics "$@"' _ {} \
-    | sort -t $'\t' -k2 -nr | head -1
+  local n_total
+  n_total=$(printf '%s\n' "$sf_ids" | grep -c . || true)
+  echo "pd_worklist.sh: --deep-topic-scan: walking $n_total subfields at ${THROTTLE}s/request — expect ~$(( n_total * 2 )) seconds …" >&2
+  n_scanned=0; n_failed=0; best=""
+  while IFS= read -r sf; do
+    [[ -n "$sf" ]] || continue
+    local page row
+    if ! page=$(pd_api GET "/taxonomy/topics?subfield_id=$sf&limit=200"); then
+      n_failed=$((n_failed + 1))
+      continue
+    fi
+    n_scanned=$((n_scanned + 1))
+    row=$(_topic_pick_from_list "$page" "$needle_lc" "$sf")
+    if [[ -n "$row" ]]; then
+      if [[ -z "$best" ]] || \
+         [[ "$(printf '%s' "$row" | cut -f2)" -gt "$(printf '%s' "$best" | cut -f2)" ]]; then
+        best="$row"
+      fi
+    fi
+  done <<<"$sf_ids"
+  if [[ "$n_failed" -gt 0 ]]; then
+    echo "pd_worklist.sh: WARNING: deep topic scan covered $n_scanned/$n_total subfields ($n_failed failed) — a 'no match' below may just be the unscanned part" >&2
+  fi
+  [[ -n "$best" ]] || return 1
+  printf '%s' "$best"
 }
 
 resolve_taxon() {
@@ -214,7 +331,7 @@ resolve_taxon() {
     '[.[] | select(.display_name | ascii_downcase | contains($q|ascii_downcase))] | sort_by(-.paper_count) | .[0] // empty | "subfield|" + .id + "|" + .display_name')
   if [[ -n "$hit" ]]; then echo "$hit"; return 0; fi
 
-  echo "pd_worklist.sh: resolving '$raw' as a Topic name — scanning subfields (~3-5s) …" >&2
+  echo "pd_worklist.sh: resolving '$raw' as a Topic name …" >&2
   local needle_lc topic_hit tid tname
   needle_lc=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
   topic_hit=$(topic_find_by_name "$needle_lc") || topic_hit=""
@@ -241,6 +358,7 @@ if [[ -n "$SEED_PAPER" ]]; then
   if [[ "$SIMILAR_SET" == "1" ]]; then
     echo "pd_worklist.sh: WARNING: --similar has no effect in --paper seed mode (--limit sizes the single /similar?k= expansion instead) — ignored" >&2
   fi
+  echo "pd_worklist.sh: seed mode — --limit ${LIMIT} sizes the neighbour expansion only, so the pool will be up to $((LIMIT + 1)) rows (seed + ${LIMIT}) before twin collapse" >&2
   seed_json=""
   if ! seed_json=$(pd_api GET "/papers/resolve?id=$(urlenc "$SEED_PAPER")"); then
     cat >&2 <<EOF
@@ -298,19 +416,41 @@ elif [[ "$LEVEL" == "query" ]]; then
     echo "pd_worklist.sh: /papers/search failed — a 404 here means the server predates 0.8.0 (no layered search); use a taxonomy name/id target instead" >&2
     exit 4
   fi
-  layer_used=$(printf '%s' "$primary_json" | jq -r '.layer_used // "?"')
+  layer_used=$(printf '%s' "$primary_json" | jq -r '.layer_used // "?"' 2>/dev/null || echo "?")
   echo "pd_worklist.sh: /papers/search layer_used=$layer_used" >&2
-  n_primary=$(printf '%s' "$primary_json" | jq '.items | length')
+  n_primary=$(json_len "$primary_json" "items")
+  if [[ -z "$n_primary" ]]; then
+    echo "pd_worklist.sh: /papers/search returned no .items array — unexpected response shape. First 300 bytes:" >&2
+    printf '%s' "$primary_json" | head -c 300 | sed 's/^/  /' >&2; echo >&2
+    exit 4
+  fi
   if [[ "$n_primary" == "0" ]]; then
     echo "pd_worklist.sh: no papers matched query '$TAX_ID' (try fewer/other words, or a taxonomy target)" >&2
     exit 0
+  fi
+  # A thin pool is the failure mode this path actually has: the server's
+  # waterfall stops at the title layer as soon as it has ANY trgm hits, so a
+  # broad topic can come back with a handful of rows and never reach the
+  # semantic layer. Stage 1.5 then has nothing to converge from.
+  if [[ "$layer_used" == "title" && "$n_primary" -lt "$LIMIT" ]]; then
+    cat >&2 <<EOF
+pd_worklist.sh: NOTE: the search stopped at the title layer with $n_primary/$LIMIT rows.
+  The semantic layer was never reached, so this pool is probably thinner than the
+  corpus actually holds. If you need a wider pool: use fewer / less literal query
+  words, or take the best hit as a seed and run --paper <id> to expand by similarity.
+EOF
   fi
 else
   papers_q="/papers?${LEVEL}_id=${TAX_ID}&has_extraction=true&limit=${LIMIT}"
   [[ -n "$YEAR_FROM" ]] && papers_q="${papers_q}&year_from=${YEAR_FROM}"
 
   primary_json=$(pd_api GET "$papers_q") || { echo "pd_worklist.sh: failed to fetch primary paper list" >&2; exit 4; }
-  n_primary=$(printf '%s' "$primary_json" | jq '.items | length')
+  n_primary=$(json_len "$primary_json" "items")
+  if [[ -z "$n_primary" ]]; then
+    echo "pd_worklist.sh: GET /papers returned no .items array — unexpected response shape. First 300 bytes:" >&2
+    printf '%s' "$primary_json" | head -c 300 | sed 's/^/  /' >&2; echo >&2
+    exit 4
+  fi
 
   if [[ "$n_primary" == "0" ]]; then
     echo "pd_worklist.sh: no papers matched ${LEVEL}_id=${TAX_ID} (try relaxing --year-from)" >&2
@@ -321,7 +461,13 @@ fi
 # ── 5. merge primary + similar-neighbour expansion, deduped, ordered ───
 ids_only_file=$(mktemp "${TMPDIR:-/tmp}/pd_worklist_ids.XXXXXX")
 ids_tsv_file=$(mktemp "${TMPDIR:-/tmp}/pd_worklist_tsv.XXXXXX")
-trap 'rm -f "$ids_only_file" "$ids_tsv_file"' EXIT
+rows_file=$(mktemp "${TMPDIR:-/tmp}/pd_worklist_rows.XXXXXX")
+trap 'rm -f "$ids_only_file" "$ids_tsv_file" "$rows_file" "$_HDR_FILE"' EXIT
+
+# Papers the API refused to hand over. Counted, never swallowed: a worklist
+# that is short because of rate limiting must not be mistaken for a small field.
+N_SIMILAR_FAILED=0
+N_DETAIL_FAILED=0
 
 add_id() {
   local id="$1" src="$2"
@@ -339,11 +485,12 @@ if [[ "$LEVEL" == "paper" ]]; then
   n_primary_added=1
   sim_json=""
   if ! sim_json=$(pd_api GET "/papers/${SEED_ID}/similar?k=${LIMIT}"); then
+    N_SIMILAR_FAILED=$((N_SIMILAR_FAILED + 1))
     echo "pd_worklist.sh: warning: similar-fetch failed for seed $SEED_ID — worklist will be the seed alone" >&2
   else
     while IFS= read -r sid; do
       [[ -n "$sid" ]] && add_id "$sid" "similar"
-    done < <(printf '%s' "$sim_json" | jq -r '.items[].paper.id')
+    done < <(printf '%s' "$sim_json" | jq -r '.items[].paper.id' 2>/dev/null)
   fi
 else
   primary_ids=$(printf '%s' "$primary_json" | jq -r '.items[].id')
@@ -353,30 +500,51 @@ else
   n_primary_added=$(wc -l < "$ids_only_file" | tr -d ' ')
 
   if [[ "$SIMILAR" -gt 0 ]]; then
+    n_before_similar=$(wc -l < "$ids_only_file" | tr -d ' ')
     while IFS= read -r pid; do
       [[ -n "$pid" ]] || continue
       sim_json=""
       if ! sim_json=$(pd_api GET "/papers/${pid}/similar?k=${SIMILAR}"); then
+        N_SIMILAR_FAILED=$((N_SIMILAR_FAILED + 1))
         echo "pd_worklist.sh: warning: similar-fetch failed for $pid, skipping expansion" >&2
       else
         while IFS= read -r sid; do
           [[ -n "$sid" ]] && add_id "$sid" "similar"
-        done < <(printf '%s' "$sim_json" | jq -r '.items[].paper.id')
+        done < <(printf '%s' "$sim_json" | jq -r '.items[].paper.id' 2>/dev/null)
       fi
-      sleep 0.15
     done <<<"$primary_ids"
+    if [[ "$(wc -l < "$ids_only_file" | tr -d ' ')" == "$n_before_similar" ]]; then
+      cat >&2 <<EOF
+pd_worklist.sh: WARNING: --similar $SIMILAR added ZERO new papers.
+  On this corpus a paper's nearest neighbour is often its own twin vertex, which
+  the pool already holds — at low k the expansion contributes nothing. Re-run with
+  a larger --similar (3-4) if you wanted a wider pool. Raising k costs no extra
+  requests, only a longer result list per call.
+EOF
+    fi
   fi
 fi
 
 n_merged=$(wc -l < "$ids_only_file" | tr -d ' ')
 
-# ── 6. per-paper detail -> worklist.jsonl ───────────────────────────
-: > "$OUT/worklist.jsonl"
-n_written=0
+# ── 6. per-paper detail -> rows, then twin-collapse -> worklist.jsonl ──
+# --append seeds the row buffer with the existing pool so a second batch merges
+# into the first instead of overwriting it. SKILL.md told readers to re-run into
+# the same <slug> for another batch; before 0.4.2 that silently destroyed the
+# previous pool. The collapse pass below then dedups across both batches.
+: > "$rows_file"
+n_appended=0
+if [[ "$APPEND" == "1" && -s "$OUT/worklist.jsonl" ]]; then
+  cat "$OUT/worklist.jsonl" >> "$rows_file"
+  n_appended=$(wc -l < "$OUT/worklist.jsonl" | tr -d ' ')
+  echo "pd_worklist.sh: --append: carrying $n_appended existing row(s) into the merge" >&2
+fi
+n_rows=0
 while IFS=$'\t' read -r pid src; do
   [[ -n "$pid" ]] || continue
   detail_json=""
   if ! detail_json=$(pd_api GET "/papers/${pid}"); then
+    N_DETAIL_FAILED=$((N_DETAIL_FAILED + 1))
     echo "pd_worklist.sh: warning: detail-fetch failed for $pid, skipping" >&2
   else
     # paperdaily's paper_etl writes several missing string attrs as "" not
@@ -392,12 +560,111 @@ while IFS=$'\t' read -r pid src; do
         doi: (.doi | blank_to_null),
         arxiv_id: (.arxiv_id | blank_to_null),
         oa_url: (.external_full_text_url | blank_to_null),
+        # The PDF url paperdaily'"'"'s own worker already resolved (v1 0.8.87+).
+        # Kept as its own field rather than folded into oa_url: it is a real
+        # PDF we reached, whereas oa_url degrades to a doi.org landing page.
+        # Absent on older servers -> null, and stage 2 just skips that layer.
+        pdf_url: (.resolved_pdf_url | blank_to_null),
         source: $source
-      }' >> "$OUT/worklist.jsonl"
-    n_written=$((n_written + 1))
+      }' >> "$rows_file"
+    n_rows=$((n_rows + 1))
   fi
-  sleep 0.15
 done < "$ids_tsv_file"
+n_rows=$((n_rows + n_appended))
+
+# ── twin collapse ────────────────────────────────────────────────────
+# The same work reaches the pool under several ids, because they are separate
+# vertices in the graph and step 5's id-level dedup cannot see it (identifiers
+# only arrive with the detail fetch). Three shapes, all measured on real pools:
+#
+#   1. `arxiv:NNNN` vs an OpenAlex `W…` whose DOI is `10.48550/arxiv.NNNN`
+#   2. `arxiv:NNNN` vs a `W…` with BOTH doi and arxiv_id null whose oa_url is
+#      literally `https://arxiv.org/pdf/NNNN`   (0.4.1 missed this one)
+#   3. the same work under two genuinely DIFFERENT DOIs — venue DOI vs arXiv
+#      DOI vs Underline DOI (0.4.1 missed this one too; e.g. MIRAGE under both
+#      10.48448/5ad5-d532 and 10.18653/v1/2025.findings-naacl.157)
+#
+# Measured before 0.4.2: an 18-row pool held 5 twin pairs = 13 distinct works.
+#
+# This is not cosmetic. Stage 1.5 would spend two reading slots on one paper,
+# and — worse — `claims.jsonl` defines `supported` as "at least two INDEPENDENT
+# papers agreeing", so a paper counted twice can promote a weak claim to
+# supported. That is false confidence in the one artifact whose job is honesty.
+#
+# Pass 1 collapses on hard identifiers (no false positives possible). Pass 2
+# collapses identical normalised titles, which is what catches shape 3 — but it
+# REFUSES to merge when both rows carry an arxiv_id and the two differ, because
+# distinct arXiv submissions are distinct works however similar their titles.
+# Every collapse is recorded to worklist.twins.jsonl and printed, so a wrong
+# merge stays visible and nothing disappears without an audit trail.
+#
+# Surviving row: the one carrying arxiv_id (it gives Stage 2 the L0 fast path),
+# with the STRONGEST source of the pair (seed > primary > similar) so a primary
+# row arriving after its similar-expanded twin is not demoted.
+jq -s '
+  def norm_arxiv: ascii_downcase | sub("^arxiv:"; "") | sub("v[0-9]+$"; "");
+  def arxiv_from_url:
+    . as $u
+    | if ($u | type) != "string" then null
+      elif ($u | test("arxiv\\.org/(pdf|abs)/"; "i"))
+      then ($u | sub("^.*arxiv\\.org/(pdf|abs)/"; ""; "i")
+               | sub("\\.pdf$"; ""; "i") | sub("[?#].*$"; "") | norm_arxiv)
+      else null end;
+  def hardkey:
+    ((.arxiv_id // "") | tostring) as $a
+    | ((.doi // "") | tostring | ascii_downcase) as $d
+    | ((.oa_url // "") | arxiv_from_url) as $ua
+    | if ($a | length) > 0 then "arxiv:" + ($a | norm_arxiv)
+      elif ($d | test("^10\\.48550/arxiv\\.")) then
+        "arxiv:" + (($d | sub("^10\\.48550/arxiv\\."; "")) | norm_arxiv)
+      elif ($ua != null and ($ua | length) > 0) then "arxiv:" + $ua
+      elif ($d | length) > 0 then "doi:" + $d
+      else "id:" + (.id | ascii_downcase)
+      end;
+  def titlekey:
+    ((.title // "") | tostring | ascii_downcase
+     | gsub("[^a-z0-9]+"; " ") | gsub("^ +| +$"; ""));
+  def better($a; $b): if ($b.arxiv_id != null and $a.arxiv_id == null) then $b else $a end;
+  def srank: if . == "seed" then 0 elif . == "primary" then 1 else 2 end;
+  def strongest($a; $b):
+    if (($b.source | srank) < ($a.source | srank)) then $b.source else $a.source end;
+  def collapse($kind):
+    reduce range(0; (.rows | length)) as $i ({order: [], best: {}, twins: .twins, src: .rows};
+        (.src[$i]) as $r
+        | (if $kind == "hard" then ($r | hardkey)
+           else (($r | titlekey) as $t
+                 | if ($t | length) == 0 then "__untitled__" + ($i | tostring) else $t end)
+           end) as $k
+        | (if $kind == "title"
+             and (.best | has($k))
+             and (.best[$k].arxiv_id != null) and ($r.arxiv_id != null)
+             and ((.best[$k].arxiv_id | norm_arxiv) != ($r.arxiv_id | norm_arxiv))
+           then false else (.best | has($k)) end) as $merge
+        | if $merge
+          then (better(.best[$k]; $r)) as $win
+               | .twins += [{kind: $kind, kept: $win.id,
+                             dropped: (if $win.id == $r.id then .best[$k].id else $r.id end),
+                             title: ($r.title // .best[$k].title)}]
+               | .best[$k] = ($win + {source: strongest(.best[$k]; $r)})
+          else (.order += [(if (.best | has($k)) then $k + "#" + ($i | tostring) else $k end)])
+               | .best[(if (.best | has($k)) then $k + "#" + ($i | tostring) else $k end)] = $r
+          end)
+    | . as $a
+    | {rows: ($a.order | map($a.best[.])), twins: $a.twins};
+  {rows: ., twins: []} | collapse("hard") | collapse("title")
+' "$rows_file" > "$rows_file.collapsed"
+
+jq -c '.rows[]'  "$rows_file.collapsed" > "$OUT/worklist.jsonl"
+jq -c '.twins[]' "$rows_file.collapsed" > "$OUT/worklist.twins.jsonl"
+
+n_written=$(wc -l < "$OUT/worklist.jsonl" | tr -d ' ')
+N_TWINS_MERGED=$(wc -l < "$OUT/worklist.twins.jsonl" | tr -d ' ')
+if [[ "$N_TWINS_MERGED" -gt 0 ]]; then
+  echo "pd_worklist.sh: collapsed $N_TWINS_MERGED twin row(s) — audit trail in worklist.twins.jsonl:" >&2
+  jq -r '"  [\(.kind)] kept \(.kept), dropped \(.dropped) — \(.title[0:60])"' \
+    "$OUT/worklist.twins.jsonl" >&2
+fi
+rm -f "$rows_file.collapsed"
 
 # Provenance sidecar for Stage 4 (upload_session.py reads .taxonomy /
 # .taxon_name). Extension file per SKILL_SPEC §8 — core artifact names unchanged.
@@ -451,9 +718,30 @@ case "$LEVEL" in
   query) echo "free-text query: $TAX_ID (layer_used=${layer_used:-?})" ;;
   *)     echo "taxonomy: $LEVEL=$TAX_ID ($TAX_NAME)" ;;
 esac
-echo "primary papers: $n_primary_added   similar-expanded: $((n_merged - n_primary_added))   merged unique: $n_merged"
-echo "worklist rows written: $n_written"
+echo "primary papers: $n_primary_added   similar-expanded: $((n_merged - n_primary_added))   merged unique ids: $n_merged"
+if [[ "${N_TWINS_MERGED:-0}" -gt 0 ]]; then
+  echo "twin rows collapsed: $N_TWINS_MERGED (same work under several ids — see worklist.twins.jsonl)"
+fi
+# Deliberately NOT phrased as "distinct works". The collapse catches hard
+# identifiers and identical titles; a cross-version duplicate whose title was
+# rewritten still slips through. Claiming uniqueness we cannot deliver is worse
+# than claiming nothing — Stage 1.5 is told to eyeball titles because of this.
+echo "worklist rows written: $n_written  (post-collapse; known duplicates removed, not a uniqueness guarantee)"
 echo "worklist: $OUT/worklist.jsonl"
 if [[ "$DO_SYNTH" == "1" && -f "$OUT/overview.md" ]]; then
   echo "overview: $OUT/overview.md"
+fi
+
+# Incompleteness is reported, never implied. A caller (human or agent) reading
+# only "worklist rows written: 12" cannot tell a 12-paper field from a
+# 50-paper field that lost 38 rows to the quota — so say which it was.
+if [[ "$N_DETAIL_FAILED" -gt 0 || "$N_SIMILAR_FAILED" -gt 0 ]]; then
+  echo
+  echo "!! WORKLIST INCOMPLETE — $N_DETAIL_FAILED paper(s) dropped (detail fetch failed),"
+  echo "   $N_SIMILAR_FAILED similar-expansion(s) skipped; $N_RETRY_WAITS rate-limit wait(s) along the way."
+  echo "   Do NOT treat this as the size of the field. Either re-run (already-seen"
+  echo "   ids are cheap to re-resolve) or raise --throttle above ${THROTTLE}s if the"
+  echo "   failures were 429s. Check the warnings above for the actual HTTP codes."
+elif [[ "$N_RETRY_WAITS" -gt 0 ]]; then
+  echo "(paced through $N_RETRY_WAITS rate-limit wait(s); no papers lost)"
 fi

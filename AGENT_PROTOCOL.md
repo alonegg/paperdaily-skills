@@ -1,6 +1,6 @@
 # Paperdaily Agent 协议（Protocol v1）
 
-> **Status**: ①②④⑦章随 0.8.0 定稿（2026-07-26）；③⑤章随 A1 定稿（2026-07-26，0.8.x 第二批，端点上线前字段名以 OpenAPI 为准）；⑥⑧持续演进。
+> **Status**: ①②④⑦章随 0.8.0 定稿（2026-07-26）；③⑤章随 A1 定稿（2026-07-26，0.8.x 第二批，端点上线前字段名以 OpenAPI 为准）；④⑦章随 0.8.5 修订（2026-07-27 回传面安全评审：evidence 条数上限 + 共享改管理员前置审核）；③章随 0.8.6 补 `GET /me/saves`（收藏库读回）；⑥⑧持续演进。
 > **定位**: 本地 agent（用户侧 Claude + skills）↔ paperdaily 服务端的**对外契约单一呈现层**。本文是契约的权威呈现；`quickstart-zh.md` 是示例层，与本文冲突时以本文为准。服务端行为以运行版本的 OpenAPI 为准。
 > **心智模型**: 车间与总控室——agent（车间，多实例）做认知与授权全文；服务端（总控室，单实例）做记忆、图谱、路由。分析真相在服务端，原文真相在本地。
 
@@ -15,7 +15,7 @@
 | `read:paper` | 论文/检索/bundle 读 | 所有 skill |
 | `synth:ask` | /ask 服务端合成 | 需综述时 |
 | `write:profile` | 画像写 | 显式管理画像时 |
-| `read:contrib` / `write:contrib` | 阅读行为事实 | reader 类客户端 |
+| `read:contrib` / `write:contrib` | 阅读行为事实 + **收藏库读回**（`GET /me/saves`，0.8.6 新增） | reader 类客户端 / 需要「用户收藏了什么」的 skill |
 | `read:reading`（0.8.0 新增） | 深读 session 回读 / 任务收件箱 | deep-research 类 |
 | `write:reading`（0.8.0 新增） | 深读产物上传 / 任务完结 | deep-research 类，**用户显式勾选** |
 
@@ -47,6 +47,8 @@
 | signals | novelty 分、被引数、subfield 最近周 pulse 摘要 |
 | you | **你的**历史关联：claims / notes / 综述矩阵 / 合集 / 深读 session 命中 |
 
+- `GET /api/v1/me/saves?limit=`（`read:contrib`，纯读 0 分，0.8.6 新增）：**用户收藏库**——`{items:[{paper_id, title, publication_date, doi, venue_name, venue_badges, tldr_zh}], total}`，与 web 库页同一份查询同一套富化字段（agent 拿到即用，不必逐篇再打 `/papers/{id}`）。`limit` 默认 100、上限 500；按 `publication_date` 倒序（**不是收藏时间**——AGE 的 `SAVED` 边无时间戳）。
+  > **要「用户收藏了什么」只能读这个端点，不要拿 `GET /me/feedback` 反推。** feedback 是行为流水，只记录经反馈路径产生的动作；用户在库页直接点收藏的论文根本不进流水，反推出的清单会系统性偏少（实地案例：库里 20 篇、反推只得 6 篇）。这个端点 0.8.6 之前不存在，是当时唯一能凑合的替代——现在不是了。
 - `you.open_questions_total` = **用户级** open 问题总数（问题收件箱整体水位，不随当前论文变化——不是"与本篇相关的问题数"）。
 - 规范：深读一篇论文前**应**拉取 bundle 注入精读上下文（"在知识全景中读"——邻域立场、版本沿革、领域脉搏与你自己的历史论断一并进 prompt）；bundle 即拉即用不缓存跨日（内容随库演进）；404 = 论文未收录，按业务降级为直接精读，不视为故障。
 
@@ -55,7 +57,9 @@
 - `POST /api/v1/me/reading-sessions`（`write:reading`）。payload：`{title, provenance{kind, skill_ver, model, taxonomy, worklist_fingerprint}, papers:[{paper_id, depth:'fulltext'|'abstract-only', note_md}], claims:[{claim, status:'supported'|'weak'|'contested'|'gap', evidence:[{paper_id, location, quote}], note}], report_md?, overview_md?, task_id?}`（`task_id` 为 A1 新增可选项：任务完结回链，语义见 §5）。
 - **幂等**：`worklist_fingerprint`（worklist.jsonl 按行 strip 后 `join('\n')` 的 sha256）唯一键；重复上传返回既有 session——**200 + `deduplicated: true`**（首传 201）。
 - **禁止件（硬性）**：PDF/任何二进制/base64 内嵌 —— 服务端拒收；原文永留本地（版权红线）。引文以短句为限。
-- **上限（定稿）**：papers ≤100 / 单篇 note_md ≤64KB / claims ≤200 / report_md ≤2MB / 单条 evidence.quote ≤500 字符；超限 413/422。
+- **上限（定稿）**：papers ≤100 / 单篇 note_md ≤64KB / claims ≤200 / **单条 claim 的 evidence ≤20 条**（v0.8.5 收紧，见下）/ report_md ≤2MB / 单条 evidence.quote ≤500 字符；整个请求体 ≤12MiB；超限 413/422。
+  > **v0.8.5 破坏性收紧（唯一一处）**：`claims[].evidence` 此前无条数上限。这是 payload 里唯一无界的列表，配合当时只看 `Content-Length` 的请求体门（chunked 请求可绕过，且服务端在鉴权前就把 body 读进内存）构成鉴权前的内存耗尽面。超过 20 条现在 422。真实深读的页码锚点式证据远低于此，实践中不会碰到；碰到了就是该拆成多条 claim。
+- **共享不是上传的一部分**：上传只入库，`visibility` 恒为 `private`。对外可见是**用户**在 web 端的独立动作，且从 v0.8.5 起需**管理员审核放行**（见 §7.5）。agent 不得代替用户申请公开。
 - **回读**：`GET /api/v1/me/reading-sessions`、`GET /api/v1/me/reading-sessions/{id}`（`read:reading`）；web 回看 `https://www.paperdaily.org/workbench?tab=reading&s=<id>`。
 - **质量语义**：服务端不做真伪裁决；不过质量门（notes 字段完整度、claims evidence 非空率）的上传**可存但标 unverified、不计积分**。参考客户端 gate 见 `skills/paperdaily-deep-research/scripts/upload_session.py`（evidence 非空率 ≥80% 等）。
 - 上传是**用户显式同意后的独立动作**——skill 不得静默上传（见 SKILL_SPEC 同意点条款）。
@@ -83,9 +87,13 @@
 2. 机构直连/浏览器兜底获取全文是 **opt-in**（`PD_FETCH_INSTITUTIONAL`/`PD_FETCH_BROWSER`），仅在用户机构授权网络内合法；不含 Sci-Hub 类渠道。
 3. 写操作（上传/画像回流）必须**显式征得用户同意**；回流个性化默认关。
 4. `denied`（付费墙拒绝）是终态不是故障，不做技术性重试。
+5. **用户回传一律不能直接对外**（v0.8.5，安全评审 2026-07-27 CEO 裁决）。上传落库 = 私有。用户把 session 切成「链接可见 / 社区可见」只是**提交审核**：服务端先跑引文门预筛（覆盖逐篇 note ∪ `report_md` ∪ `overview_md`，另加 evidence 引文总量；单块 ≤8000 字符、每份文档引文占比 ≤25%、evidence 合计 ≤8000 字符），过筛后置 `pending` 进管理员队列，**放行后才对外可读**——`unlisted-link` 与 `community` 一视同仁（能力链接不可枚举，但版权文本一样离开了本机）。被管理员下架的 session 用户不能自行重新公开。
+   - 对 agent 的含义：**不要向用户承诺「上传后就能分享链接」**。上传成功 ≠ 可公开；如实说明「已入库，公开需平台审核」。
+   - 引文门是**预筛不是判定**：它看 blockquote 标记与引号段，看不见无标记的逐字抄写。别把「过了门」当成「合规了」——合规责任仍在写笔记的那一步：转述优先，直接引用留短句 + 页码锚点。
 
 ## 8. 版本化
 
 - 协议版本随本文头部演进（v1 起）；服务端版本经 `GET /api/version`。
 - 兼容承诺：v1 端点 additive-only；破坏性变更先在已知问题清单立案，并在本文标注迁移窗口。
+  - **已用掉的破坏性额度（v0.8.5）**：`claims[].evidence` 加 20 条上限（§4）。安全修复，不设迁移窗口；理由与影响面在 §4 的引注里写明。同批的其它变更都是加严服务端行为（共享需审核）或纯新增字段，不改请求形态。
 - skill 兼容矩阵见 `SKILL_SPEC.md` 文末。

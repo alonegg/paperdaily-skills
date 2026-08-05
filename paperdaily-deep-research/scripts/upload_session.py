@@ -59,8 +59,13 @@ CLI
 
 Auth: PD_BASE / PD_KEY from the environment, else from ~/.paperdaily-cli/env.
 Depth per paper: an explicit "abstract-only" marker in the note header wins;
-otherwise a fetch_report.jsonl record with status ok/already ⇒ `fulltext`,
-anything else ⇒ `abstract-only` (honest-ledger downgrade, never upgrade).
+otherwise the fetch ledgers decide — a record whose `carrier` is one of
+binary-pdf / html-fulltext / parsed-fulltext (or, for pre-0.5.0 ledgers, whose
+status is ok/already) ⇒ `fulltext`, anything else ⇒ `abstract-only`
+(honest-ledger downgrade, never upgrade). Ledgers read, and merged, in this
+order: fetch_report.jsonl, browser_fetch_report.jsonl, fulltext_report.jsonl —
+so a paper landed by the browser layer, or read as page-ordered Markdown parsed
+from a public PDF, counts without anyone assembling a side ledger by hand.
 
 Standard library only. Python 3.9+.
 Exit codes: 0 uploaded (or deduplicated / dry-run) · 1 usage/arg error ·
@@ -90,7 +95,7 @@ MAX_QUOTE_CHARS = 500
 CLAIM_STATUSES = ("supported", "weak", "contested", "gap")
 MIN_EVIDENCE_RATE = 0.80
 
-SKILL_VER_FALLBACK = "0.3.2"
+SKILL_VER_FALLBACK = "0.4.2"
 DEFAULT_TIMEOUT = 60
 MAX_POST_ATTEMPTS = 3  # AGENT_PROTOCOL §6: backoff-retry cap
 
@@ -194,29 +199,52 @@ def _web_base(pd_base: str) -> str:
 
 
 # ─────────────────────────── artifact loading ───────────────────────────
+# A record counts as full text if the *content* is full text, whatever shape it
+# arrived in. Before 0.5.0 this was inferred from "did fetch_fulltext.py save a
+# .pdf", so a paper whose PDF had been fully parsed to page-ordered Markdown —
+# a perfectly good close read — was graded `abstract-only` and the operator had
+# to hand-build a side ledger to say otherwise. Carrier is the field that says
+# what was actually read; status stays as the fallback for older ledgers.
+_FULLTEXT_CARRIERS = frozenset(("binary-pdf", "html-fulltext", "parsed-fulltext"))
+
+# Every ledger a stage may have written. They are merged, later files winning,
+# so the browser layer's results count without anyone merging them by hand.
+_LEDGER_FILES = ("fetch_report.jsonl", "browser_fetch_report.jsonl",
+                 "fulltext_report.jsonl")
+
+
 def _load_fetch_report(session_dir: str) -> Dict[str, str]:
-    """Map raw paper_id AND its sanitised stem → fetch status."""
-    status_by_key: Dict[str, str] = {}
-    path = os.path.join(session_dir, "fetch_report.jsonl")
-    text = _read_text(path)
-    if not text:
-        return status_by_key
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
+    """Map raw paper_id AND its sanitised stem → 'fulltext' / 'partial'.
+
+    Reads every ledger in _LEDGER_FILES; a paper that reaches full text in any
+    of them is full text.
+    """
+    depth_by_key: Dict[str, str] = {}
+    for fname in _LEDGER_FILES:
+        text = _read_text(os.path.join(session_dir, fname))
+        if not text:
             continue
-        try:
-            rec = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(rec, dict):
-            continue
-        pid = str(rec.get("id") or "").strip()
-        status = str(rec.get("status") or "")
-        if pid:
-            status_by_key[pid] = status
-            status_by_key[_safe_stem(pid)] = status
-    return status_by_key
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(rec, dict):
+                continue
+            pid = str(rec.get("id") or "").strip()
+            if not pid:
+                continue
+            carrier = str(rec.get("carrier") or "").strip()
+            status = str(rec.get("status") or "")
+            is_full = carrier in _FULLTEXT_CARRIERS or status in ("ok", "already")
+            if not is_full and depth_by_key.get(pid) == "fulltext":
+                continue  # never downgrade a paper another ledger already landed
+            depth_by_key[pid] = "fulltext" if is_full else "partial"
+            depth_by_key[_safe_stem(pid)] = depth_by_key[pid]
+    return depth_by_key
 
 
 def _collect_papers(session_dir: str, problems: List[str]) -> List[dict]:
@@ -258,7 +286,7 @@ def _collect_papers(session_dir: str, problems: List[str]) -> List[dict]:
             depth = "abstract-only"
         else:
             status = fetch_status.get(paper_id) or fetch_status.get(stem)
-            depth = "fulltext" if status in ("ok", "already") else "abstract-only"
+            depth = "fulltext" if status == "fulltext" else "abstract-only"
         papers.append({"paper_id": paper_id, "depth": depth, "note_md": body})
     if len(papers) > MAX_PAPERS:
         problems.append("papers count %d exceeds the limit of %d" % (len(papers), MAX_PAPERS))
@@ -498,6 +526,13 @@ def post_session(pd_base: str, pd_key: str, payload: dict, timeout: int) -> Tupl
                     "the POST into a bodyless GET. Point PD_BASE at the final URL."
                     % (loc or "?")
                 )
+            if e.code == 429 and not (e.headers or {}).get("X-RateLimit-Limit"):
+                # Two different 429s live on this endpoint. The rate limiter
+                # always attaches X-RateLimit-* headers; the per-user session
+                # cap ("reading-session limit reached (100)") does not. Backing
+                # off and retrying a cap is pure waste and reads to the user as
+                # a flaky network, so return it straight away.
+                return e.code, body
             if e.code == 429 or e.code >= 500:
                 if attempt < MAX_POST_ATTEMPTS:
                     retry_after = e.headers.get("Retry-After") if e.headers else None
@@ -595,6 +630,24 @@ def main(argv: Optional[List[str]] = None) -> int:
             sys.stderr.write("uploaded — session %s\n" % (sid or "?"))
         if sid:
             sys.stderr.write("view it at: %s/workbench?tab=reading&s=%s\n" % (web, sid))
+        # The server tells us which paper_ids it could not find in the graph
+        # ("surfaced so the caller can flag them"). Swallowing that would break
+        # the skill's own honest-ledger rule: a paper_id that drifted between
+        # worklist.jsonl and notes/ shows up here and nowhere else, and every
+        # claim citing it is then pointing at nothing.
+        unknown = resp.get("unknown_paper_ids") or []
+        if unknown:
+            sys.stderr.write(
+                "\n警告：服务端在图谱里找不到这 %d 个 paper_id（笔记与 claims 照常入库，但引用悬空）：\n"
+                % len(unknown))
+            for pid in unknown[:20]:
+                sys.stderr.write("  - %s\n" % pid)
+            if len(unknown) > 20:
+                sys.stderr.write("  … 另有 %d 个\n" % (len(unknown) - 20))
+            sys.stderr.write(
+                "常见原因：笔记里的 **paper_id** 与 worklist.jsonl 的 id 写法不一致\n"
+                "（如把安全化文件名 arxiv_2409.10897 当成了原始 id arxiv:2409.10897），\n"
+                "或论文确实还没进语料。核对后可修正笔记重传——幂等不会产生重复 session。\n")
         if task_id:
             task_linked = resp.get("task_linked")
             if task_linked is True:
@@ -612,6 +665,13 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
     if status == 401:
         sys.stderr.write("HTTP 401 — key missing/invalid/revoked. Check PD_KEY in ~/.paperdaily-cli/env.\n")
+        return 3
+    if status == 429:
+        sys.stderr.write(
+            "HTTP 429 — %s\n"
+            "若提示 'reading-session limit reached'，这是每人 100 个 session 的上限，不是限流：\n"
+            "去 %s/workbench?tab=reading 删掉不再需要的会话后重传（重试无用）。\n"
+            % (body[:500] if body else "(empty body)", web))
         return 3
     if status is None:
         sys.stderr.write("upload failed after %d attempts: %s\n" % (MAX_POST_ATTEMPTS, body or "network error"))

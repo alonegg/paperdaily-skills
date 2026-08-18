@@ -13,7 +13,8 @@
 | **「XX 方向最近有什么」（方向不是 taxonomy 节点）** | **语义层** | `GET /papers/search?q=…&mode=semantic` |
 | **「跟这几篇像的论文」** | **相似 + 语义并集** | `/papers/{id}/similar` ∪ `mode=semantic&q=<该篇标题>` |
 | 「AI 这个学科里最新的」（是 taxonomy 节点） | 分面拉池 | `GET /papers?subfield_id=…&sort=recency\|novelty\|citations` |
-| 要一段成文综述 | 服务端合成 | `POST /ask`（**只在这一种情况用**，见 §9） |
+| **「这个领域大致什么情况」** | **预计算概览** | **`GET /taxonomy/overview?field_id=` / `?subfield_id=`**（0 积分，先看 `stale_days`） |
+| 要一段针对**你选定的那批论文**的成文综述 | 服务端合成 | `POST /ask`（**只在这一种情况用**，见 §9） |
 
 判「是不是 taxonomy 节点」不用猜：`/taxonomy/subfields` 一次拉回全部 ~250 个
 （无 `q=` 参数，自己在本地匹配名字，结果可整会话复用）。匹配不上就是模糊方向，
@@ -251,7 +252,7 @@ k=50 -> 38 条     ← 不是语料没有了，是索引参数
    带引用的叙述交给用户。这正是两个 skill 各自那一次调用。
    **必须锚定**：让它 `load_extractions(paper_ids=[…你已检出的 id…])`，否则它会自己
    跑 `find_papers_by_keyword_semantic`，拿回一批 2018-2022 的综述当材料。
-2. **够到 REST 没开的三个工具**（下表）。这三件事目前**只有 `/ask` 这一个门**。
+2. **够到 REST 没开的两个工具**（下表）。venue 维度目前**只有 `/ask` 这一个门**。
 3. **把合成成本转移到服务端**——`/ask` 烧的是服务端 token 与积分，不是你的上下文。
    要把 40 篇论文的抽取压成一段话时，这个转移是划算的。
 
@@ -270,7 +271,7 @@ k=50 -> 38 条     ← 不是语料没有了，是索引参数
 | `lookup_author` | `GET /authors?q=` |
 | `count_papers` | `GET /papers/_count?group_by=` |
 | `load_extractions` | **`POST /papers/batch`（≤100 id / 次，比工具更好用）** |
-| **`find_community_overview`** | ❌ **无** |
+| `find_community_overview` | `GET /taxonomy/overview?field_id=` / `?subfield_id=`（v0.8.94 新增） |
 | **`find_papers_by_venue`** | ❌ **无** |
 | **`lookup_venue`** | ❌ **无** |
 
@@ -280,11 +281,15 @@ k=50 -> 38 条     ← 不是语料没有了，是索引参数
   `contributions / key_claims / methods / limitations / open_questions / tldr_zh`
   全给你了（`GET /papers/{id}` 也内联同样的字段）。这是 12 个有 REST 门的工具里
   最容易被误以为「只有 /ask 能做」的一个。
-- **`find_community_overview` 是 GraphRAG 式的预计算领域概览**（读
-  `topic_community_summaries`，Field/Subfield 各一条摘要 + 代表论文 id），
-  **零 LLM 成本却只能从最贵的端点进**。要「这个领域大致什么情况」时，它比你自己
-  拉 30 篇再总结要准得多。⚠️ 但**先看 `refreshed_at`**：生产上 278 行全部停在
-  **2026-05-06**，没有 timer 在刷。当成「几个月前的领域快照」用，别当最新动态。
+- **要「这个领域大致什么情况」，用 `GET /taxonomy/overview`，别用 `/ask`。**
+  它是 GraphRAG 式的预计算领域概览（`topic_community_summaries`，Field/Subfield
+  各一条 200-300 词摘要 + 代表论文 id），**纯表读、0 积分、sub-100ms**，比你自己
+  拉 30 篇再总结要准也要快得多。v0.8.94 之前这份数据只能经 `/ask` 取用——一次
+  37 秒的 LLM 往返换一行 SELECT。
+  ⚠️ **先看响应里的 `stale_days`**：这张表以前只被手工建过一次，静默陈旧了 3.5
+  个月（278 行全部停在 2026-05-06）才被发现。现在周六 09:00 有 timer 重建，且年龄
+  是响应字段而不是要你自己去推。`top_paper_ids` 就是这段摘要的取材，直接喂
+  `POST /papers/batch` 拿完整记录。
 
 ---
 

@@ -58,10 +58,14 @@ CoT 论文的检索拽进「教育领导力」簇）；**③ `/ask` 是合成端
 **`/ask` 的定位（别读成"agent 不许用"）.** 协议里「agent 不走 /ask」是针对**检索**
 说的。它有三种正当用法：**① 合成**——你已经用结构化端点选定了论文，要一段成文的
 带引用叙述给用户（必须用 `load_extractions(paper_ids=[…])` 锚定你的清单，否则它会
-自己去检索，拿回一批 2018-2022 的综述当材料）；**② 够到 REST 没开的三个工具**——
-`find_community_overview` / `find_papers_by_venue` / `lookup_venue`，这三件事目前
-只有这一个门；**③ 把合成成本转移到服务端**（烧的是服务端 token 和积分，不是你的
-上下文）。代价是 p50 37-57s、无流式、10 积分、2 req/min，所以一次工作流最多一次。
+自己去检索，拿回一批 2018-2022 的综述当材料）；**② 够到 REST 没开的两个工具**——
+`find_papers_by_venue` / `lookup_venue`，venue 维度目前只有这一个门；**③ 把合成
+成本转移到服务端**（烧的是服务端 token 和积分，不是你的上下文）。代价是 p50
+37-57s、无流式、10 积分、2 req/min，所以一次工作流最多一次。
+
+⚠️ **「这个领域大致什么情况」不要走 `/ask`**：`GET /taxonomy/overview?field_id=`
+（或 `?subfield_id=`）直接给一段预计算的领域概览，纯表读、0 积分、sub-100ms。
+**先看它返回的 `stale_days`** —— 这份数据曾静默陈旧 3.5 个月。
 
 ⚠️ **别为了拿抽取去调 `/ask`**：`POST /papers/batch`（≤100 id/次）直接返回
 `contributions / key_claims / methods / limitations / open_questions / tldr_zh`。

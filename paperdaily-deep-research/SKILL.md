@@ -104,9 +104,12 @@ agent、一段进入综合的上下文。所以在跑阶段 1 之前先用一句
 
 **但「不做检索」≠「不能用」**：`/ask` 是合成端点，本 skill 那一次 overview 调用就是
 它的正当用法（且**必须**用 `load_extractions(paper_ids=[…])` 锚定 worklist，否则它
-自己去检索，拿回的材料跟你的清单对不上）。另外三个工具——`find_community_overview`
-（GraphRAG 式领域预计算概览）/ `find_papers_by_venue` / `lookup_venue`——**REST 至今
-没开**，要用只能走 `/ask`。⚠️ 但**别为了拿抽取调它**：`POST /papers/batch`（≤100
+自己去检索，拿回的材料跟你的清单对不上）。另外两个工具——`find_papers_by_venue` /
+`lookup_venue`——**REST 至今没开**，venue 维度只能走 `/ask`。
+⚠️ **领域概览已经有 REST 门了**：`GET /taxonomy/overview?field_id=`（或
+`?subfield_id=`）返回预计算的 200-300 词领域概览 + 代表论文 id，纯表读 0 积分，
+可以直接当阶段 1 的背景材料；**看一眼 `stale_days`** 再决定信不信它「当前活跃」。
+⚠️ 另**别为了拿抽取调 `/ask`**：`POST /papers/batch`（≤100
 id/次）直接返回 `contributions / key_claims / methods / limitations /
 open_questions / tldr_zh`，比 `load_extractions` 更省。完整的 15 工具 → REST 对照表
 在 thin skill 的 `references/semantic-search.md` §9。

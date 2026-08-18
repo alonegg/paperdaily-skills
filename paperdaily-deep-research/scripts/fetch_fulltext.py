@@ -90,10 +90,15 @@ agent driving the script runs those searches, appends the URLs it finds to the
 worklist row as `"urls_extra": [...]`, and re-runs (fetched papers are skipped).
 
 Ledger outcomes per attempt (references/fulltext-sources.md):
-  ok · already · skipped_no_config · skipped_optin · miss · denied · error
+  ok · already · skipped_no_config · skipped_optin · miss · blocked · denied · error
 `miss` (0.4.2) is "this layer does not have the paper" — a 404, or a lookup API
 that answered fine but lists nothing. It used to be recorded as `denied`, which
 promises "asked and refused, do not retry" and made triage read the ledger wrong.
+`blocked` (1.2) is the same mistake one level down: a bot challenge is not an
+access decision. Measured 2026-08-18 from a campus network that *does* subscribe
+to OUP, Wiley, Taylor & Francis and Elsevier — all four answer their article
+pages with a Cloudflare 403 challenge. Filing those as `denied` marks subscribed
+journals unavailable, systematically and invisibly.
 
 Per-record fields beyond status/layer/url (1.1): `carrier` (binary-pdf here;
 the reading stage may add html-fulltext / parsed-fulltext), `sha256`, `version`,
@@ -124,7 +129,7 @@ MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024  # engineering rule #3: 50 MB cap
 PDF_MAGIC = b"%PDF"
 DEFAULT_TIMEOUT = 30
 DEFAULT_THROTTLE = 1.0
-VERSION = "1.1"
+VERSION = "1.2"
 
 # Title-search guard (L4b). A working-paper copy legitimately carries a
 # DIFFERENT title from the version of record — "Do Mutual Funds Walk the Talk?
@@ -376,6 +381,51 @@ def _looks_like_challenge(body: bytes) -> bool:
     return any(m in low for m in _CHALLENGE_MARKERS)
 
 
+def _pdf_pages(blob: bytes) -> int:
+    """Page count without a PDF library.
+
+    Counting `/Type /Page` (excluding `/Pages`) matched pypdf exactly on every
+    file in a 12-PDF corpus check. Returns 0 on PDFs that keep their page tree
+    in object streams — callers must treat 0 as "unknown", never as "empty".
+    """
+    return len(re.findall(rb"/Type\s*/Page[^s]", blob))
+
+
+def _teaser_note(pdf: bytes, doi: str, config: "Config",
+                 attempts: List[dict]) -> Optional[str]:
+    """Is this PDF a publisher teaser rather than the article?
+
+    The `%PDF` magic rule (engineering rule #1) catches paywall HTML served as
+    application/pdf. It does not catch the other substitution: a *real* PDF that
+    is only the first page or two of the article. Measured 2026-08-18 — Berghahn
+    answered a request for a 15-page article (pp. 48-62) with a 2-page extract:
+    valid header, clean text layer, opens fine. Every byte-level check passes.
+
+    That file is worse than no file. The reading stage will take notes from it
+    and cite page numbers that do not exist in the article, while the ledger says
+    full text was obtained.
+
+    Crossref knows the page range. To keep this free in the common case, the
+    lookup only runs when the PDF is already suspiciously short — a normal
+    20-page download never costs a request.
+    """
+    pages = _pdf_pages(pdf)
+    if not pages or pages > 4 or not doi:
+        return None
+    data = _fetch_json("https://api.crossref.org/works/%s" % urllib.parse.quote(doi, safe=""),
+                       config, "teaser_check", attempts)
+    rng = (((data or {}).get("message") or {}).get("page") or "") if isinstance(data, dict) else ""
+    m = re.match(r"\s*(\d+)\s*[-\u2013]+\s*(\d+)\s*$", str(rng))
+    if not m:
+        return None
+    first, last = int(m.group(1)), int(m.group(2))
+    want = last - first + 1
+    if want < 4 or pages >= max(3, want * 0.6):
+        return None
+    return "%d pages, article is %d (pp. %s) — looks like a teaser extract" % (
+        pages, want, rng)
+
+
 def _safe_filename(paper_id: str) -> str:
     name = re.sub(r"[^A-Za-z0-9._-]", "_", paper_id.strip())
     name = name.strip("._") or "paper"
@@ -525,7 +575,7 @@ def _fetch_json(url: str, config: Config, layer: str, attempts: List[dict]) -> O
     return None
 
 
-def _classify(status: Optional[int]) -> str:
+def _classify(status: Optional[int], body: bytes = b"") -> str:
     """HTTP status → ledger outcome.
 
     `denied` carries a promise in references/fulltext-sources.md — "we asked and
@@ -540,6 +590,11 @@ def _classify(status: Optional[int]) -> str:
         return "miss"
     if 200 <= status < 300:
         return "ok"
+    # A challenge page is not a permission answer — see the module docstring.
+    # It arrives as a 403 exactly like a paywall does, so the body is the only
+    # thing that separates them.
+    if body and _looks_like_challenge(body):
+        return "blocked"
     return "denied"
 
 
@@ -581,12 +636,14 @@ def _record_pdf_attempt(r: HttpResult, layer: str, url: str, attempts: List[dict
         note = "not_pdf"
         if r.content_type:
             note += " (%s)" % r.content_type.split(";")[0][:40]
-        if _looks_like_challenge(r.body):
-            note += " challenge"
-        attempts.append(_attempt(layer, url, "denied", r.status, _with_redirect_notes(r, note)))
+        challenged = _looks_like_challenge(r.body)
+        if challenged:
+            note += " challenge (not an access decision)"
+        attempts.append(_attempt(layer, url, "blocked" if challenged else "denied",
+                                 r.status, _with_redirect_notes(r, note)))
         return None
     # non-2xx
-    attempts.append(_attempt(layer, url, _classify(r.status), r.status,
+    attempts.append(_attempt(layer, url, _classify(r.status, r.body), r.status,
                              _with_redirect_notes(r, "http %s" % r.status)))
     return None
 
@@ -1143,9 +1200,13 @@ def _cdp_fetch(landing_url: str, config: Config,
                                      "ok", None, "pdf %d bytes via %s"
                                      % (len(pdf), rec.get("mechanism"))))
             return pdf, rec.get("pdf_url") or landing_url
+        # `blocked` passes through: the browser layer reports it when a human
+        # gate was never cleared, which is a statement about the human, not
+        # about entitlement. Flattening it to `denied` here would re-introduce
+        # exactly the conflation the outcome was split out to prevent.
         attempts.append(_attempt("L6b_cdp", landing_url,
                                  rec.get("status") if rec.get("status") in
-                                 ("denied", "error") else "denied",
+                                 ("denied", "blocked", "error") else "denied",
                                  None, (rec.get("note") or "no pdf")[:160]))
         return None, None
     except Exception as e:
@@ -1262,9 +1323,15 @@ def fetch_one(paper: dict, out_dir: str, config: Config) -> dict:
         with open(tmp, "wb") as fh:
             fh.write(pdf)
         os.replace(tmp, fpath)
+        teaser = _teaser_note(pdf, (paper.get("doi") or "").strip(), config, attempts)
         record.update(status="ok", layer=layer, url=url, file=fname, bytes=len(pdf),
                       carrier="binary-pdf",
                       sha256=hashlib.sha256(pdf).hexdigest())
+        if teaser:
+            # Keep the file — it is evidence, and a human may want to look. But
+            # strip the carrier so the phase gate cannot count it as full text,
+            # and say so loudly enough that it never reaches a reading agent.
+            record.update(partial=True, carrier=None, note=teaser)
         # A hit found by title is, by construction, a different manuscript
         # version from the DOI that was asked for. Say so in the ledger — the
         # reading stage has to record which version it read, and page numbers
@@ -1275,6 +1342,15 @@ def fetch_one(paper: dict, out_dir: str, config: Config) -> dict:
             record["version"] = "preprint"
     else:
         record.update(status="failed")
+        # Surface a challenge-blocked failure distinctly. "All layers exhausted"
+        # and "the publisher put a bot check in front of content you are entitled
+        # to" need opposite next moves: the first wants a web search for an open
+        # copy, the second wants the user to open the page in their own browser,
+        # where it will very likely just work.
+        blocked_at = sorted({_origin(a["url"])[1] for a in attempts
+                             if a.get("outcome") == "blocked" and a.get("url")})
+        if blocked_at:
+            record["blocked_by_challenge"] = blocked_at
         doi = (paper.get("doi") or "").strip()
         if doi:
             record["manual_url"] = "https://doi.org/%s" % doi
@@ -1458,7 +1534,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                          "fetching; paywalled-only papers cost a web search each.\n")
         return 0
 
-    fetched = already = failed = 0
+    fetched = already = failed = blocked = 0
     needs_search: List[dict] = []
     # The per-host throttle is what keeps us polite, and it is enforced inside
     # each request — so running several papers at once only overlaps *different*
@@ -1508,6 +1584,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 already += 1
             else:
                 failed += 1
+                if rec.get("blocked_by_challenge"):
+                    blocked += 1
                 if rec.get("needs_web_search"):
                     needs_search.append({
                         "id": rec["id"], "title": rec.get("title"),
@@ -1522,6 +1600,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     sys.stderr.write("fetched %d / already %d / failed %d of %d\n" %
                      (fetched, already, failed, n))
     sys.stderr.write("report: %s\n" % report_path)
+    if blocked:
+        # Say this before the web-search hand-back: for these papers a web
+        # search is the wrong next move.
+        sys.stderr.write(
+            "%d paper(s) were stopped by a bot challenge, NOT by a paywall.\n"
+            "  A challenge says nothing about entitlement — if your institution\n"
+            "  subscribes, opening `manual_url` in your own browser usually just\n"
+            "  works. See `blocked_by_challenge` in the report for the hosts.\n"
+            "  Run this from inside the entitled network with PD_FETCH_CDP=1 and\n"
+            "  clear the challenge in your own browser when it asks.\n"
+            % blocked)
 
     # The web-search hand-back. Written even when empty (as a 0-byte file) so
     # the caller can tell "the loop ran and found nothing to do" apart from

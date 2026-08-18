@@ -86,6 +86,7 @@ import os
 import re
 import shutil
 import socket
+import subprocess
 import struct
 import sys
 import time
@@ -502,6 +503,108 @@ def _download_via_behavior(cdp: CDP, session: str, target_id: str, url: str,
         return fh.read()
 
 
+# 出版商页面上"你的机构是谁"的回显。Springer 最实在，会把出口 IP、机构名和
+# 授权账号一起写在页面上；其余几家只给机构名。
+_WHOAMI_PROBES = (
+    ("Springer", "https://link.springer.com/journal/10683"),
+    ("Emerald",  "https://www.emerald.com/insight/publication/issn/0307-4358"),
+)
+_JS_WHOAMI = r"""(() => {
+  const t = document.body ? document.body.innerText : '';
+  const out = [];
+  const pats = [
+    /Access provided by[^\n]{0,90}/gi,
+    /\b\d{1,3}(?:\.\d{1,3}){3}\s+[A-Z][^\n]{0,90}(?:University|Institute|College|Consortium)[^\n]{0,60}/g,
+    /[^\n]{0,60}(?:University|Institute|College)\s+of\s+[^\n]{0,50}/g,
+  ];
+  for (const p of pats) { const m = t.match(p); if (m) out.push(...m.slice(0, 2)); }
+  return { hits: [...new Set(out)].slice(0, 4) };
+})()"""
+
+
+def whoami(cdp: "CDP", timeout: float) -> int:
+    """出版商眼里，这个浏览器属于哪个机构？
+
+    本地直连模式最容易踩的坑，是**以为自己在校园网内而实际不在**——挂着 VPN、
+    在家、或走了运营商出口。那时每一篇都会返回"无权限"，看上去像图书馆没订，
+    其实只是出口 IP 不对。IP 段自己是猜不出来的（学校的授权网段没有公开清单），
+    所以这里不猜：直接打开出版商页面，读它自己回显的机构名。
+
+    这也解释了为什么不能靠 headless/无 cookie 的客户端做这件事——授权是按出口
+    IP 判的，而判定结果必须由真正要去取全文的那个会话来验证。
+    """
+    try:
+        ip = urllib.request.urlopen("https://ifconfig.me/ip", timeout=10).read().decode().strip()
+    except Exception:
+        ip = "?"
+    sys.stderr.write("浏览器出口 IP: %s\n" % ip)
+
+    found = False
+    for name, url in _WHOAMI_PROBES:
+        t = cdp.call("Target.createTarget", {"url": "about:blank"})
+        tid = t["targetId"]
+        sess = cdp.call("Target.attachToTarget",
+                        {"targetId": tid, "flatten": True})["sessionId"]
+        try:
+            cdp.call("Page.enable", session=sess)
+            cdp.call("Runtime.enable", session=sess)
+            cdp.call("Page.navigate", {"url": url}, session=sess, timeout=timeout)
+            cdp.wait_event("Page.loadEventFired", min(timeout, 30.0))
+            time.sleep(1.5)
+            raw = _evaluate(cdp, sess, _JS_WHOAMI, timeout)
+            hits = (raw or {}).get("hits") or []
+            if hits:
+                found = True
+                sys.stderr.write("  %-9s → %s\n" % (name, hits[0][:110]))
+            else:
+                sys.stderr.write("  %-9s → 页面没有回显机构（未必代表没授权）\n" % name)
+        except Exception as e:
+            sys.stderr.write("  %-9s → 打不开：%s\n" % (name, str(e)[:70]))
+        finally:
+            try:
+                cdp.call("Target.closeTarget", {"targetId": tid})
+            except Exception:
+                pass
+
+    if found:
+        sys.stderr.write("\n认出了机构身份——这个浏览器处在授权网络内，可以直接取全文。\n")
+        return 0
+    sys.stderr.write(
+        "\n没有任何出版商认出机构身份。\n"
+        "  多半是出口 IP 不在学校的授权网段（VPN / 在家 / 走了运营商出口）。\n"
+        "  在这种状态下跑批量取全文，会把一整批**订阅内**的论文记成没权限。\n"
+        "  先接校园网（或断开 VPN）再跑。\n")
+    return 1
+
+
+def _focus_for_human(cdp: "CDP", target_id: str, session: str) -> None:
+    """把需要人工处理的那一页顶到人眼前。
+
+    没有这一步，"停下来等人"就是空转：标签页是后台建的，Chrome 窗口多半压在
+    终端后面，提示只有 stderr 上一行字——人根本不知道要去点什么，于是等满
+    180 秒超时，账本记一笔失败，而验证其实点一下就过了。
+
+    三层都试，各自失败都不致命：标签页在窗口内置顶、窗口在 Chrome 内置顶、
+    Chrome 应用本身抢到焦点。最后一层是平台相关的，只在 macOS 做——抢焦点
+    是有代价的行为，只在确实需要人动手时才做，正常取全文的路径上不碰。
+    """
+    for method, params, kw in (
+        ("Target.activateTarget", {"targetId": target_id}, {}),
+        ("Page.bringToFront", {}, {"session": session}),
+    ):
+        try:
+            cdp.call(method, params, **kw)
+        except Exception:
+            pass
+    if sys.platform == "darwin":
+        try:
+            subprocess.run(
+                ["osascript", "-e", 'tell application "Google Chrome" to activate'],
+                capture_output=True, timeout=5)
+        except Exception:
+            pass
+
+
 def fetch_one(cdp: CDP, url: str, dest_dir: str, wait_human: int,
               timeout: float, keep_tab: bool) -> Dict[str, Any]:
     """Open `url` in a new tab, clear any human gate, return the PDF bytes."""
@@ -527,13 +630,14 @@ def fetch_one(cdp: CDP, url: str, dest_dir: str, wait_human: int,
         blocked = _looks_blocked(state or {})
         if blocked:
             if wait_human <= 0:
-                rec["status"] = "denied"
+                rec["status"] = "blocked"
                 rec["note"] = "%s detected and --wait-human 0" % blocked
                 return rec
+            _focus_for_human(cdp, target_id, session)
             sys.stderr.write(
-                "\n  ⟨需要人工⟩ %s 触发了%s。\n"
-                "  请在已打开的 Chrome 标签页里完成验证/登录，完成后本脚本会自动继续\n"
-                "  （最多等 %d 秒；这一步 agent 不会代做）。\n    %s\n\n"
+                "\a\n  ⟨需要人工⟩ %s 触发了%s。\n"
+                "  已把该标签页切到前台，请在 Chrome 里点完验证/登录，脚本会自动继续\n"
+                "  （最多等 %d 秒；这一步 agent 不会、也不该代做）。\n    %s\n\n"
                 % (urllib.parse.urlsplit(url).hostname or url,
                    "人机验证" if blocked == "challenge" else "登录墙",
                    wait_human, url))
@@ -550,8 +654,11 @@ def fetch_one(cdp: CDP, url: str, dest_dir: str, wait_human: int,
                     sys.stderr.flush()
                     break
             else:
-                rec["status"] = "denied"
-                rec["note"] = "%s not cleared within %ds" % (blocked, wait_human)
+                # 人没来点，不代表没权限——判 denied 会让上游"别重试"，
+                # 而这恰恰是最该重试（或让人再点一次）的一种失败。
+                rec["status"] = "blocked"
+                rec["note"] = ("%s 在 %ds 内没被清掉（人未处理，非权限问题）"
+                               % (blocked, wait_human))
                 return rec
 
         cands = _pdf_candidates(state or {}, url)
@@ -686,14 +793,29 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="seconds to wait for a human to clear a challenge (0 = never)")
     ap.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT)
     ap.add_argument("--keep-tab", action="store_true")
+    ap.add_argument("--whoami", action="store_true",
+                    help="问出版商：这个浏览器属于哪个机构？（跑批量前先做一次）")
     args = ap.parse_args(argv)
 
     if args.list:
         return _cmd_list(args.port)
+    if args.whoami:
+        try:
+            cdp = CDP(args.port, timeout=args.timeout)
+        except Exception as e:
+            sys.stderr.write("%s\n" % e)
+            return 2
+        try:
+            return whoami(cdp, args.timeout)
+        finally:
+            try:
+                cdp.close()
+            except Exception:
+                pass
     modes = sum(bool(x) for x in (args.url, args.worklist, args.search))
     if modes != 1:
         sys.stderr.write("error: need exactly one of --url / --worklist / --search "
-                         "(or --list)\n")
+                         "(or --list / --whoami)\n")
         return 1
     if not args.search and not args.out:
         sys.stderr.write("error: --out is required\n")

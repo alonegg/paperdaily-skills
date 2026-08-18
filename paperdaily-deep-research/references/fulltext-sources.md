@@ -14,7 +14,7 @@
 | L3 PMC / Europe PMC | 有 PMID/PMCID，或 DOI 能在 Europe PMC 查到映射 | 无（公开 API） | 生物医学文献强，其他学科基本 0 命中 | 查不到 PMCID → `miss`；有 PMCID 但下载失败 → `error` |
 | L4 出版商 TDM API | DOI 前缀属于 Elsevier / Wiley，且已申请 TDM 凭证 | `ELSEVIER_TDM_KEY` / `WILEY_TDM_TOKEN`（可选） | 仅限该出版商 + 已订阅内容 | 未配 key → `skipped_no_config`；配了 key 但 401/403 → `denied`（大概率没有该刊订阅或 TDM 权限，不要重试）；5xx/超时 → `error`（可重试） |
 | L4b 标题检索兄弟版本 | 前面全 miss 且有标题 | 无（OpenAlex 免费；`S2_API_KEY` 才启用 S2 子层，keyless S2 首请求就 429） | 看学科：CS/生物有 preprint 兄弟时命中率高；**经管法实测这一层产出接近 0**，真正管用的是下面的网页检索回路 | 命中的兄弟版本没有可用 URL / 相似度或作者守卫不过 → miss |
-| L5 机构订阅直连 | `PD_FETCH_INSTITUTIONAL=1` 且用户实际处于有订阅授权的网络环境（如校园网 IP） | `PD_FETCH_INSTITUTIONAL=1` + DOI 前缀路由表（前缀 → 出版商 PDF URL 模板）；未命中前缀时退化为抓落地页 `citation_pdf_url` meta | 完全取决于机构订阅范围，同一 DOI 换网络环境结果可能不同 | 未置 1 → `skipped_optin`；置了但收到登录页/付费墙页面（非 `%PDF`，通常是 HTML 且含 "subscribe"/"purchase"/"institutional access" 关键词）→ `denied`；网络超时/连接失败 → `error` |
+| L5 机构订阅直连 | `PD_FETCH_INSTITUTIONAL=1` 且**运行脚本的这台机器**实际处于有订阅授权的网络环境（如校园网 IP）——**跑前先 `pd_browser_fetch.py --whoami` 确认，别靠推断** | `PD_FETCH_INSTITUTIONAL=1` + DOI 前缀路由表（前缀 → 出版商 PDF URL 模板）；未命中前缀时退化为抓落地页 `citation_pdf_url` meta | 完全取决于机构订阅范围，同一 DOI 换网络环境结果可能不同 | 未置 1 → `skipped_optin`；置了但收到登录页/付费墙页面（非 `%PDF`，通常是 HTML 且含 "subscribe"/"purchase"/"institutional access" 关键词）→ `denied`；网络超时/连接失败 → `error` |
 | L6 Playwright headless 兜底 | 前面全部 miss，且 `PD_FETCH_BROWSER=1`（**与 L5 相互独立**，不需要同时开 `PD_FETCH_INSTITUTIONAL`） | `PD_FETCH_BROWSER=1`（需要能跑 headless Chromium 的环境） | 能处理需要 JS 渲染才出现下载链接的落地页（OA 仓储常见）；仍受限于是否有权限，不用于绕过付费墙 | 未置 1 → `skipped_optin`；无 oa_url 也无 doi 可渲染 → `skipped_no_config`；渲染完成后找不到 PDF 链接，或下载内容非 `%PDF` → `error` 或 `denied`（视页面内容是否明确呈现付费墙特征） |
 | L6b 你自己的 Chrome 会话 | 前面全 miss，且 `PD_FETCH_CDP=1` | Chrome 开了 remote debugging（`chrome://inspect/#remote-debugging` 开关），用**日常 profile** | 覆盖 Cloudflare 挡的期刊、校园代理/SSO 后的内容、JS 拼下载链接的仓储——凡是你本人用浏览器打得开的 | 未置 1 → `skipped_optin`；连不上 Chrome → `skipped_no_config`（报错自带设置指引）；页面渲染完没有 PDF 入口，或人机验证在等待期内没被人工清掉 → `denied` |
 | L7 交回网页检索 | L0-L6b 全部 miss | 无 | **对经管法这是承重层**：开放副本常以工作论文形态存在于会议站/作者主页，学术聚合器不收录、通用检索一搜就有 | 不适用；产出 `needs_web_search.jsonl`（含 `suggested_query`），你搜完把 URL 写回 worklist 的 `urls_extra` 再重跑（幂等，已下好的跳过） |
@@ -28,25 +28,61 @@ L5 DOI 前缀路由表示例（需按实际订阅范围维护，不要照抄）�
 10.1109  -> (无直连模板，退化到落地页抓 citation_pdf_url)
 ```
 
+## 在授权网段内本地直连（主路，1.2 补强）
+
+L5/L6b 的正确用法是：**agent 就在机构授权网段内的机器上跑**，直连出版商；撞上人机验证时把浏览器顶到人面前，人点一下，脚本继续。
+
+```sh
+python3 scripts/pd_browser_fetch.py --whoami        # 必做的第一步
+export PD_FETCH_INSTITUTIONAL=1 PD_FETCH_CDP=1
+python3 scripts/fetch_fulltext.py --worklist … --out …/pdfs/
+```
+
+**`--whoami` 为什么必做**：这一层最容易踩的坑是**以为自己在授权网段内而实际不在**（VPN / 在家 / 运营商出口），那时每一篇都返回"无权限"，看上去像图书馆没订，其实只是出口 IP 不对——而这个错误会静默污染一整批。授权网段没有公开清单，猜不出来，所以不猜：用**将要去取全文的那个浏览器会话**打开出版商页面，读它自己回显的机构名。Springer 最实在，会把出口 IP、机构名、授权账号一起写在页面上：
+
+```
+浏览器出口 IP: <你的出口 IP>
+  Springer  → <你的出口 IP> <Your University>
+              (<机构授权号>) - Springer <你所在的联盟> (<联盟号>)
+```
+
+认不出就先接网络，别硬跑。注意它必须由**真正要取全文的那个会话**来做——授权按出口 IP 判定，headless/无 cookie 的探测回答的不是同一个问题。
+
+**撞上验证时**：脚本在用户自己的 Chrome 里打开该页、`Target.activateTarget` + `Page.bringToFront` **切到前台**（macOS 上再 `osascript` 激活 Chrome 应用）、响一声铃，然后轮询等人清掉（默认 180s）。没有这一步，"停下来等人"就是空转——标签页是后台建的、Chrome 窗口压在终端后面，人根本不知道要去点什么，于是等满超时记一笔失败，而验证其实点一下就过了。
+
+等待超时记 **`blocked` 而不是 `denied`**：人没来点，不代表没权限。
+
 ## 判据铁律
 
 **校验 `%PDF` magic bytes，不信 `Content-Type` 头。** 出版商/代理常把付费墙 HTML 页面用 `Content-Type: application/pdf` 返回；必须读取文件前 4-5 字节确认是 `%PDF-` 开头才算成功，HTTP 200 不等于拿到了正确内容。
+
+**但 `%PDF` 也不等于全文——还要对页数（1.2）。** 2026-08-18 实测：Berghahn 对一篇 48–62 页（共 15 页）的文章返回了一个 **2 页**的试读片段，`%PDF-` 头合法、能正常打开、有完整文字层，字节级校验全部通过。这种文件混进语料的后果比拿不到更糟——精读 agent 会照着它写笔记，引用的页码在原文里根本不存在，而账本上写着"已获取全文"。
+
+判法（`fetch_fulltext.py::_teaser_note`）：数 PDF 里的 `/Type /Page`，和 Crossref `page` 字段给的范围（`"48-62"` → 应有 15 页）比对，显著偏少（取 60%）就标 `partial`。不需要任何额外依赖。
+
+**只在可疑时才查 Crossref**：PDF 页数 >4 就直接放行，不发请求——正常的 20 页下载零额外开销，只有短得反常的才去核对。页码范围缺失、或原文本来就短（<4 页）时跳过：宁可漏判，不要把正常的短文误杀。实测 2 页试读片段被抓出、20 页全文放行且未触发请求。
 
 状态定义（每次尝试必须落入其中之一，写进产出账本）：
 
 - `skipped_no_config` — 缺少必需的环境变量/凭证，这一层根本没跑。不算失败，只是没配置。
 - `skipped_optin` — 该层需要显式 opt-in（L5/L6）而用户没打开开关。合规默认关闭，不是 bug。
 - **`miss`（0.4.2 新增）** — 这一层**没有这篇论文**：404/410，或查询 API 正常응答但记录为空（Unpaywall 不认识这个 DOI、DOI 查不到 PMCID、落地页没有 `citation_pdf_url`）。**这不是权限问题**，换一层就好。
-- `denied` — 尝试过，收到明确的"无权限"信号（401/403、付费墙/登录页内容特征）。大概率是真的没有权限，**不要重试**；重试大概率触发反爬限流或违反服务条款。
+- **`blocked`（1.2 新增）** — 撞上了**人机验证**（Cloudflare / Akamai Bot Manager / Imperva），不是权限判定。**它对"你有没有订阅"一无所知。**
+- `denied` — 尝试过，收到明确的"无权限"信号（付费墙/登录页内容特征、401、以及排除挑战后的 403）。大概率是真的没有权限，**不要重试**；重试大概率触发反爬限流或违反服务条款。
 - `error` — 瞬时性失败（超时、5xx、429、网络错误、内容格式异常）。可以重试，重试次数需设上限。
+- **`partial`（1.2 新增，记在 record 上而非 attempt 上）** — 拿到了合法 PDF，但页数对不上 Crossref 的页码范围，判为**试读片段**。文件保留（是证据），但 `carrier` 置空，阶段 4 的 phase gate 不计入全文覆盖率，**也不要送进精读**。
 
-**为什么把 `miss` 从 `denied` 里拆出来（0.4.2）**：`denied` 带着一个承诺——"问过了，被拒了，别重试"——triage 会照这个承诺行事。而 404 说的完全是另一回事：这一层没有这篇而已。混在一起会让账本看上去像一堵权限墙，把"这个 DOI Unpaywall 没收录"误读成"你没有订阅权限"，进而误导用户去开 `PD_FETCH_INSTITUTIONAL`。状态码归类：401/403 → `denied`；404/410 → `miss`；429/5xx/超时 → `error`；其余 4xx → `denied`。
+**为什么把 `miss` 从 `denied` 里拆出来（0.4.2）**：`denied` 带着一个承诺——"问过了，被拒了，别重试"——triage 会照这个承诺行事。而 404 说的完全是另一回事：这一层没有这篇而已。混在一起会让账本看上去像一堵权限墙，把"这个 DOI Unpaywall 没收录"误读成"你没有订阅权限"，进而误导用户去开 `PD_FETCH_INSTITUTIONAL`。状态码归类：404/410 → `miss`；429/5xx/超时 → `error`；**403 要看 body**——含挑战特征（`Just a moment` / `cf-mitigated: challenge` / `bm-verify` / `_Incapsula_Resource`）判 `blocked`，否则判 `denied`；401 及其余 4xx → `denied`。HTTP 200 同理：返回挑战页判 `blocked`，返回付费墙页判 `denied`。
+
+**为什么把 `blocked` 从 `denied` 里拆出来（1.2）**：和 0.4.2 拆 `miss` 是同一个错误的下一层。2026-08-18 在一个**确实订阅了** OUP、Wiley、Taylor & Francis、Elsevier 的校园网出口实测：这四家的文章页一律返回 Cloudflare 403 挑战——首页也一样，而首页根本不涉及任何订阅权限，这就证明了 403 来自机器人识别而非权限。按 `denied` 归类，会把一整批**订阅范围内**的期刊标成"没权限"，而且错得系统、静默、难以察觉。看到 `blocked` 的正确反应不是放弃，也不是去开机构直连，而是**在浏览器里打开** `manual_url`（L6b / 人工），或把 agent 挪到真正有授权的网段里跑。
 
 ## 合规边界声明
 
 - 只走 open access（各层公开 OA 判定）与用户自身确实拥有的机构订阅授权（L5，必须 opt-in 且限定在真实处于该网络环境时才生效）。
 - **不包含、不实现、不允许接入 Sci-Hub 或任何绕过付费墙 / 未授权访问的渠道。** L6 headless 浏览器仅用于处理需要 JS 渲染才能拿到合法下载入口的场景（如某些 OA 仓储、机构库的落地页），不用于绕过登录墙或验证码。
 - 某一层返回 `denied` 应视为"当前权限下拿不到全文"，直接转 L7 人工渠道，而不是切换手段继续尝试绕过。
+- **`blocked` 不是放行信号。** 它说明对方在做人机识别，正确反应是让**人**去浏览器里完成访问（L6b / 手动），或把 agent 挪到真正有授权的网段里跑——不是升级对抗手段。不要为了过挑战去堆 TLS 指纹伪装、无头浏览器反检测、验证码求解：headless Chrome 实测解不开 Cloudflare 挑战，而再往下就是纯粹的反检测军备竞赛。更实际的理由是**代价不对等**：触发风控被封的是机构的公网出口 IP，那个 IP 是全校师生共用的，一次实验换全校断访问。
+- 批量取全文的正路是各出版商的 **TDM 接口**（Elsevier `APIKey`+`insttoken`、Wiley `Wiley-TDM-Client-Token`、Springer Nature TDM），由图书馆申请、按机构 IP 认证。ScienceDirect 的文章页会用 W3C TDM Reservation Protocol 明确声明这件事：`<meta name="tdm-reservation" content="1">` 加一个 `tdm-policy` 链接。看到这个声明就照它走。
 
 ## 常见失败排查
 

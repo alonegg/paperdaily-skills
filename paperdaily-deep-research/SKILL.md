@@ -498,6 +498,54 @@ python3 scripts/pd_browser_fetch.py --url "https://doi.org/10.1093/rfs/hhag020" 
 同源 `fetch(credentials:'include')`，和 `Browser.setDownloadBehavior` + 下载完成
 事件。浏览器路线**最多试 3 分钟**，不出字节就转公开仓储/作者稿/网页检索。
 
+### 校园网内取订阅全文（主路）
+
+**这一层的正确用法：agent 就在校园网内的机器上跑，直连出版商；撞上人机验证时
+把浏览器顶到你面前，你点一下，脚本接着往下取。**
+
+```sh
+# ① 先确认你真的在授权网段内 —— 这一步别跳
+python3 scripts/pd_browser_fetch.py --whoami
+
+# ② 确认后开这两个开关，正常跑瀑布
+export PD_FETCH_INSTITUTIONAL=1     # 出版商直连
+export PD_FETCH_CDP=1               # 撞验证时借你自己的 Chrome
+python3 scripts/fetch_fulltext.py --worklist … --out …/pdfs/ --jobs 4
+```
+
+**为什么 `--whoami` 是必做的第一步。** 本地直连模式最容易踩的坑，是**以为自己
+在校园网内而实际不在**——挂着 VPN、在家、或走了运营商出口。那时每一篇都会返回
+"无权限"，看上去像图书馆没订，其实只是出口 IP 不对，而这个错误会**静默地污染
+一整批**。学校的授权网段没有公开清单，猜不出来，所以不猜：直接用**将要去取全文
+的那个浏览器会话**打开出版商页面，读它自己回显的机构名。
+
+```
+$ python3 scripts/pd_browser_fetch.py --whoami
+浏览器出口 IP: <你的出口 IP>
+  Springer  → <你的出口 IP> <Your University>
+              (<机构授权号>) - Springer <你所在的联盟> …
+认出了机构身份——这个浏览器处在授权网络内，可以直接取全文。
+```
+
+认不出就先接校园网/断 VPN，别硬跑。
+
+**撞上验证时会发生什么。** 脚本把那一页在你的 Chrome 里打开、**切到前台**、
+响一声铃，然后停下等你点完（默认 180s，`PD_CDP_WAIT_HUMAN` 可调），清掉后自己
+继续。agent 不解验证码，也不该解——这一步只能是你。一个域名过一次通常够覆盖整批。
+
+等待超时记 `blocked` 而不是 `denied`：人没来点，不代表没权限。
+
+### 三个判定别读错
+
+- `blocked` — 人机验证挡住了，**它对有没有订阅一无所知**。在浏览器里打开
+  `manual_url` 通常直接就有。
+- `denied`（出版商页面明确给出购买入口）— 出版商官网确实没权限，但 **DOI 永远
+  指向出版商**，而图书馆常常是通过 EBSCO / ProQuest / JSTOR 买的这本刊。转
+  L7 之前值得先去聚合平台按**刊名**检索一次。
+- `partial` — 拿到的是**试读片段**（`%PDF` 合法、能打开、有文字层，只是页数
+  对不上原文页码范围）。**不要送进精读**，否则笔记会引到原文里不存在的页，
+  而账本上写着"已获取全文"。
+
 **中途怎么看进度**：`[i/n]` 进度行走 stderr（0.4.1 起逐行 flush）。但如果你把
 输出重定向到文件，**最可靠的进度信号是 `fetch_report.jsonl`**——它每完成一篇就
 落盘并 flush，`wc -l` 一下就知道走到第几篇了。别因为日志文件没动就判定卡死。
@@ -530,6 +578,9 @@ API——`api.unpaywall.org` / `api.crossref.org` / NCBI-PMC / EBI（作查询�
 - 本 skill 不含、也不会添加 Sci-Hub 等绕过付费墙的渠道。
 - 账本里 `denied` 意味着「请求了但被拒（大概率无订阅权限）」，不要
   当成技术故障反复重试。
+- 账本里 `blocked` 是**另一回事**：撞上人机验证，**它对有没有订阅一无所知**。
+  别读成没权限，也别为了过它去堆反检测手段——正确反应是让人在浏览器里
+  打开，或把 agent 挪到真正有授权的网段里跑。
 
 **Phase gate → 阶段 3**：账本里判为全文（`carrier` 是 binary-pdf /
 html-fulltext / parsed-fulltext 之一，或老账本的 `status` 是 ok/already）覆盖

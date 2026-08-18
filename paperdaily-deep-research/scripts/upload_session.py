@@ -240,6 +240,12 @@ def _load_fetch_report(session_dir: str) -> Dict[str, str]:
             carrier = str(rec.get("carrier") or "").strip()
             status = str(rec.get("status") or "")
             is_full = carrier in _FULLTEXT_CARRIERS or status in ("ok", "already")
+            # A teaser extract is a real PDF with a real text layer, so it carries
+            # `binary-pdf` and would otherwise be graded full text. It is not: the
+            # page numbers in a note taken from it do not exist in the article.
+            # Any ledger may flag it; the gate refuses to count it either way.
+            if rec.get("partial") is True or str(rec.get("outcome") or "") == "partial":
+                is_full = False
             if not is_full and depth_by_key.get(pid) == "fulltext":
                 continue  # never downgrade a paper another ledger already landed
             depth_by_key[pid] = "fulltext" if is_full else "partial"

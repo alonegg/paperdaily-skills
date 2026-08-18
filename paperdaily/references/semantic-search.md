@@ -71,13 +71,37 @@
 
 ## 3. 判「这次检索没打中」的判据
 
-不要凭结果条数判断——没打中的时候条数一样是满的。看两个字段：
+不要凭结果条数判断——没打中的时候条数一样是满的。两个信号都在响应里、零额外
+请求，但**强度差很多**：
 
-1. **top-1 `score` < 0.60** → 大概率没打中（打中的实测在 0.62-0.76）；
-2. **`why` 里的 `in dominant cluster [X]`，X 不是你要的领域** → 确定没打中。
+**强信号（主判据）：`why` 里的 `in dominant cluster [X]`。** X 不是你要的领域就是
+没打中，没有例外。这一条只能由你（知道用户想要哪个领域）来判，任何阈值都替代不了。
 
-这两条都在响应里，零额外请求。命中时 `why` 还会给 `cited by N papers` /
-`recent`，可以直接用来向用户解释推荐理由（模板生成、非 LLM 编造）。
+**弱信号（次判据）：top-1 `score`。** 实测分布：
+
+| 查询 | score | dominant cluster | 实际 |
+|---|---|---|---|
+| `chain-of-thought` | 0.5248 | [Educational Leadership and Practices] | **没打中** |
+| `chain-of-thought prompting` | 0.5419 | [Educational Leadership and Practices] | **没打中** |
+| `mixture of experts routing in sparse transformers` | 0.5936 | [Domain Adaptation and Few-Shot Learning] | 打中（8/8 全是 MoE 论文） |
+| `graph` | 0.6102 | [Advanced Graph Theory Research] | 打中，但**查询过泛** |
+| `differentially private stochastic gradient descent` | 0.6435 | [Privacy-Preserving Technologies] | 打中 |
+| `teacher professional development and student achievement` | 0.6456 | [Technology-Enhanced Education Studies] | 打中 |
+| `spectral clustering on hypergraphs` | 0.6576 | [Complex Network Analysis] | 打中 |
+| `retrieval augmented generation reduces hallucination in QA` | 0.6638 | [Topic Modeling] | 打中 |
+
+miss ≤0.542、hit 从 0.5936 起 ⇒ **阈值取 0.56**（落在实测空档里）。
+
+⚠️ **这个阈值先前定成 0.60，上线第一次跑就误伤了**——`mixture of experts routing
+in sparse transformers` 拿 0.5936 被判 miss，而它 8 条结果全对。**0.60 卡在 hit
+区间里，不在空档里。别再往上调。**
+
+⚠️ **分数高不代表查询够具体**：`graph`（1 个词）拿 0.6102、cluster 也对，但这种
+查询对任何具体问题都没用。**「太泛」这一类没有任何阈值抓得到**，只能靠 §2 那条
+纪律（写成一整句）在源头避免。
+
+命中时 `why` 还会给 `cited by N papers` / `recent`，可以直接用来向用户解释推荐
+理由（模板生成、非 LLM 编造）。
 
 处置：把查询改写成更长更具体的一句话重跑，或者改用 §5 的探针定 scope。
 

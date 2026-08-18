@@ -257,12 +257,22 @@ echo "- 检索层: \`mode=semantic\` (pinned) · 查询数 $nq · 去重后 $nr 
 [[ -n "$SCOPE" && "$SCOPE" != "auto" ]] && echo "- scope: \`$SCOPE\`${YEAR_FROM:+ · year_from=$YEAR_FROM}"
 echo
 
-awk_warn=$(printf '%s' "$top" | awk '{print ($1 < 0.60) ? "yes" : "no"}')
+# 0.56 而不是 0.60：实测 miss 落在 <=0.542、hit 从 0.5936 起，0.60 卡在 hit
+# 区间里会误伤（`mixture of experts routing in sparse transformers` 0.5936 结果
+# 全对却被判 miss）。且 `graph`（1 词）拿 0.6102 —— **分数高不代表查询够具体**，
+# 那一类只能靠读 cluster 判，没有阈值抓得到。
+awk_warn=$(printf '%s' "$top" | awk '{print ($1 < 0.56) ? "yes" : "no"}')
 if [[ "$awk_warn" == "yes" && -z "$SEED_CSV" ]]; then
   cat <<EOF
-> ⚠️ 最高分只有 $top。0.6 以下通常意味着**这个查询没打中语料**，而不是
-> 语料里没有——检查下面 \`why\` 里的 dominant cluster 是不是你要的领域；
-> 不是就把查询写成一整句更具体的描述再来一次。
+> ⚠️ 最高分只有 $top。这个语料上 0.56 以下基本都是**查询没打中**（实测 miss
+> 0.52-0.54、hit ≥0.59），而不是语料里没有。把查询写成一整句更具体的描述再来一次。
+
+EOF
+fi
+if [[ -z "$SEED_CSV" ]]; then
+  cat <<EOF
+> **判是否打中，先看下表 \`why\` 列里的 dominant cluster 是不是你要的领域**——
+> 那是强信号，分数只是弱提示（\`graph\` 这种过泛的查询照样能拿 0.61）。
 
 EOF
 fi

@@ -116,8 +116,10 @@ open_questions / tldr_zh`，比 `load_extractions` 更省。完整的 15 工具 
 一篇教育领导力短评（score 0.542，`why` 写着 dominant cluster
 `[Educational Leadership and Practices]`），而
 `chain-of-thought prompting elicits reasoning in large language models`
-把原论文排在第一（0.759）。**判「没打中」看两处**：top-1 `score` < 0.60，
-或 `why` 里的 dominant cluster 不是目标领域——两者都在响应里，零额外请求。
+把原论文排在第一（0.759）。**判「没打中」主要看 `why` 里的 dominant cluster
+是不是目标领域**（强信号，只能由你判）；top-1 `score` 是弱提示，实测 miss ≤0.542、
+hit 从 0.5936 起，阈值取 **0.56**——两者都在响应里，零额外请求。
+⚠️ 分数**判不出「查询太泛」**：`graph`（1 词）拿 0.6102 且 cluster 正确。
 
 更完整的检索规范（探针定 scope、多改写扇出、seed 双通道、k>38 截断、延迟与配额）
 见 thin skill 的 `references/semantic-search.md`；那份手册的数字与本节同源。
@@ -306,10 +308,17 @@ rank-30 = 0.027，而**同一篇论文的两条记录**（arXiv 版 vs OpenAlex 
 真要按标题定位某一篇时用 `--search-mode title`；`--search-mode auto` 保留为逃生口。
 
 **改成语义层之后，失败模式换了一种，必须换判据**：池子不会再薄，但可能**整批落进
-错误的簇**——行数满、看起来健康、每个下游 gate 都放行。脚本因此在检索后打印
-`semantic top-1 score=… (in dominant cluster […])`，并在 score < 0.60 时告警。
-看到那条告警**不要带着这个池子进阶段 1.5**：把目标改写成更长更具体的一整句重跑。
-实测打中的 top-1 在 0.62-0.76，没打中的在 0.52-0.54。查询短于 4 个词时脚本会先
+错误的簇**——行数满、看起来健康、每个下游 gate 都放行。脚本因此在检索后无条件打印
+`semantic top-1 score=… (in dominant cluster […])`。**判据的主体是那个 cluster，
+不是分数**：cluster 不是你的领域就是没打中，没有例外，而这一条只能由你来判。
+分数只是弱提示（阈值 0.56 时才告警）。看到告警**不要带着这个池子进阶段 1.5**，
+把目标改写成更长更具体的一整句重跑。
+
+⚠️ **阈值曾定成 0.60，上线第一次跑就误伤**：`mixture of experts routing in sparse
+transformers` 拿 0.5936 被判 miss，而它 8 条结果全对。实测 miss ≤0.542、hit 从
+0.5936 起，0.60 卡在 hit 区间里。**别再往上调。**
+⚠️ **分数高不代表查询够具体**：`graph`（1 词）拿 0.6102 且 cluster 正确——「太泛」
+这一类没有阈值抓得到，只能靠「写成一整句」在源头避免。查询短于 4 个词时脚本会先
 提醒——`chain-of-thought prompting`（2 词）实测把整批结果拽进「教育领导力」簇。
 
 **Phase gate → 阶段 1.5**：`worklist.jsonl` 存在、每行合法 JSON 且

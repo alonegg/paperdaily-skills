@@ -277,8 +277,10 @@ S=~/.claude/skills/paperdaily/scenarios/semantic-search.sh
    实测 20 条只重合 1 条，两条通道都投票的才是真核心件。
 2. **`sem 分` 和 `sim 近度` 是两个量纲，不要互相比大小**（前者是重排后的复合分，
    0.62-0.76 算命中；后者是 1−余弦距离，0.97+ 是常态）。
-3. **top-1 的 `sem 分` < 0.60，或者 `why` 里的 dominant cluster 明显不是这个领域
-   → 这次没打中**。改写成更长更具体的一整句重跑，不要靠加 `--limit` 硬凑。
+3. **先看 `why` 里的 dominant cluster 是不是这个领域**——那是强信号；`sem 分`
+   只是弱提示（阈值 0.56，实测 miss ≤0.542、hit ≥0.5936）。⚠️ **分数高不代表
+   查询够具体**：`graph` 这种一个词的查询照样拿 0.61 且 cluster 也对。判定没打中
+   就改写成更长更具体的一整句重跑，不要靠加 `--limit` 硬凑。
 
 几个会静默坑人的事实（全部实测，详见 `references/semantic-search.md`）：
 

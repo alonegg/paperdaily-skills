@@ -469,25 +469,36 @@ pd_worklist.sh: NOTE: the search stopped at the title layer with $n_primary/$LIM
 EOF
   fi
   # Semantic-layer miss: the batch is full-length but landed in the wrong
-  # cluster. Both tells are in the response, so check them rather than reading
-  # row count as health. Measured: on-target top-1 scores 0.62-0.76; a
-  # keyword-length query scored 0.52-0.54 with a why[] cluster from an
-  # unrelated field.
+  # cluster — it looks healthy at every downstream gate. Both tells are in the
+  # response, so print them; the CLUSTER is the judgement, the score is only a
+  # hint. Measured 2026-08-18 on prod:
+  #
+  #   chain-of-thought                            0.5248  [Educational Leadership]   MISS
+  #   chain-of-thought prompting                  0.5419  [Educational Leadership]   MISS
+  #   mixture of experts routing in sparse trans. 0.5936  [Domain Adaptation]        hit
+  #   graph                                       0.6102  [Advanced Graph Theory]    hit, but far too vague
+  #   differentially private SGD                  0.6435  [Privacy-Preserving]       hit
+  #   spectral clustering on hypergraphs          0.6576  [Complex Network]          hit
+  #
+  # So: misses sit <=0.542, hits start at 0.5936 → the cutoff belongs in that
+  # gap, not at 0.60 (0.60 was inside the HIT range and flagged the correct MoE
+  # query on its first production run). And note `graph` at 0.6102: a high score
+  # does NOT mean the query was specific enough — no threshold can catch that,
+  # only reading the cluster can.
+  _SEM_MISS_SCORE=0.56
   if [[ "$layer_used" == "semantic" ]]; then
     top_score=$(printf '%s' "$primary_json" | jq -r '[.items[].score // 0] | max // 0')
     top_why=$(printf '%s' "$primary_json" | jq -r '[.items[].why // []] | flatten
                    | map(select(startswith("in dominant cluster"))) | first // ""')
-    if awk -v s="$top_score" 'BEGIN{exit !(s < 0.60)}'; then
+    echo "pd_worklist.sh: semantic top-1 score=$top_score ${top_why:+($top_why)}" >&2
+    echo "pd_worklist.sh: ^ CHECK THAT CLUSTER — if it is not your field, the pool is wrong despite being full-length." >&2
+    if awk -v s="$top_score" -v t="$_SEM_MISS_SCORE" 'BEGIN{exit !(s < t)}'; then
       cat >&2 <<EOF
-pd_worklist.sh: WARNING: semantic top-1 score is $top_score (<0.60) — this query
-  probably did NOT hit the corpus, even though it returned $n_primary rows.
-  ${top_why:+Reranked cluster was: $top_why — is that your field?}
-  Rewrite the target as a longer, more specific sentence and re-run. Do NOT carry
-  a missed pool into stage 1.5; a full-length wrong-cluster pool looks healthy at
-  every downstream gate.
+pd_worklist.sh: WARNING: top-1 score $top_score is below $_SEM_MISS_SCORE, which on this
+  corpus has meant a missed query (measured misses 0.52-0.54, hits >=0.59) — even
+  though it returned $n_primary rows. Rewrite the target as a longer, more specific
+  sentence and re-run. Do NOT carry a missed pool into stage 1.5.
 EOF
-    else
-      echo "pd_worklist.sh: semantic top-1 score=$top_score ${top_why:+($top_why)}" >&2
     fi
   fi
 else

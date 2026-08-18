@@ -2,13 +2,13 @@
 
 [paperdaily](https://www.paperdaily.org) 是一个"重后端、轻前端"的每日论文系统：把论文流入知识图谱，按你的兴趣画像做每日 4 层推荐，并提供可编程的 v1 API。本仓库是它的公开 Claude Code skills 与 agent 协议文档。
 
-> **English.** This repository ships the public Claude Code skills and agent-protocol docs for [paperdaily](https://www.paperdaily.org), a daily research-paper recommendation platform with a knowledge-graph backend and a bearer-key v1 API. Two skills are included: `paperdaily` (thin query CLI: field digests, author lookups, and watchlist management — queries are read-only, watchlist create/delete/run are writes and always ask you first) and `paperdaily-deep-research` (a three-stage pipeline that goes from a research field or a single seed paper to a citation-grounded literature review — platform retrieval, local open-access full-text fetching, and agent-team deep reading/synthesis, with optional upload of your own analysis back to the paperdaily workbench). All full-text fetching is OA-first, institutional access is strictly opt-in, downloaded PDFs never leave your machine, and nothing here touches Sci-Hub.
+> **English.** This repository ships the public Claude Code skills and agent-protocol docs for [paperdaily](https://www.paperdaily.org), a daily research-paper recommendation platform with a knowledge-graph backend and a bearer-key v1 API. Two skills are included: `paperdaily` (thin query CLI: field digests, author lookups, semantic search over fuzzy research directions or seed papers, and watchlist management — queries are read-only, watchlist create/delete/run are writes and always ask you first) and `paperdaily-deep-research` (a three-stage pipeline that goes from a research field or a single seed paper to a citation-grounded literature review — platform retrieval, local open-access full-text fetching, and agent-team deep reading/synthesis, with optional upload of your own analysis back to the paperdaily workbench). All full-text fetching is OA-first, institutional access is strictly opt-in, downloaded PDFs never leave your machine, and nothing here touches Sci-Hub.
 
 ## Skills 清单
 
 | 目录 | 用途 |
 |---|---|
-| [`paperdaily/`](paperdaily/) | thin 查询 skill：领域/学科/话题日报、作者近作、watchlist 周追踪。查询只读；watchlist 的 create/delete/run 是写操作，调用前必征得你同意（需 `write:profile`，按需索取）。 |
+| [`paperdaily/`](paperdaily/) | thin 查询 skill：领域/学科/话题日报、作者近作、**语义检索**（模糊研究方向 / 给定论文找相似）、watchlist 周追踪。查询只读；watchlist 的 create/delete/run 是写操作，调用前必征得你同意（需 `write:profile`，按需索取）。 |
 | [`paperdaily-deep-research/`](paperdaily-deep-research/) | 深度调研 skill：从「一个领域 / 一篇种子论文」到「可溯源的深度文献综述」——平台检索推荐 → 本地 OA 全文瀑布下载 → agent team 逐篇精读 + 跨篇综合；可选把你自己的分析产物回传 paperdaily 工作台。 |
 
 配套文档：
@@ -56,6 +56,14 @@ key 的 scopes 至少勾 `read:digest, read:paper, synth:ask`；要用 deep-rese
 thin 查询 skill 的日常用法：
 
 > AI 今天有什么新论文？ / Bengio 最近发了啥？
+
+方向不是学科分类里的节点、或者手里已经有几篇论文要找相似的，走语义检索：
+
+> 帮我找找「多智能体协作做代码审查」这个方向的论文 / 找几篇跟 arxiv:2201.11903 像的
+
+判据与实测数字在 [`paperdaily/references/semantic-search.md`](paperdaily/references/semantic-search.md)：
+概念型查询要钉 `mode=semantic`（默认的 `mode=auto` 会先跑标题层，实测 19.6s 只回 3 条，
+钉死后 5.1s 回 20 条）、查询要写成一整句、单个种子的相似邻域比直觉窄得多。
 
 ## 协议与规范
 

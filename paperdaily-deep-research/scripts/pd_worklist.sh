@@ -7,15 +7,17 @@
 # Usage:
 #   pd_worklist.sh "<Field name | Field id | 4-digit Subfield id | T-prefixed Topic id | free-text query>" \
 #     [--limit 25] [--year-from YYYY] [--similar 2] [--out DIR] [--no-synth] \
-#     [--throttle 1.05] [--deep-topic-scan] [--append]
+#     [--throttle 1.05] [--deep-topic-scan] [--append] [--search-mode semantic|title|auto]
 #   pd_worklist.sh --paper <paper id | DOI | arXiv id> \
 #     [--limit 25] [--out DIR] [--no-synth]
 #
 # Retrieval follows the layered protocol (docs/api/AGENT_PROTOCOL.md §2):
 # facet pool-pulls stay on GET /papers?…_id=, fuzzy text goes to
-# GET /papers/search?q=&mode=auto (title→semantic waterfall, 0.8.0+), exact
-# identifiers go to GET /papers/resolve?id=. POST /ask is used exactly once,
-# for overview.md — never as a retrieval channel.
+# GET /papers/search?q=&mode=semantic (pinned — NOT the mode=auto waterfall,
+# whose title layer is accepted at >=3 hits and starves the vector layer; see
+# the SEARCH_MODE comment below for the measurements), exact identifiers go to
+# GET /papers/resolve?id=. POST /ask is used exactly once, for overview.md —
+# never as a retrieval channel.
 #
 # The first positional arg resolves by shape:
 #   - T-prefixed id (e.g. T10270)           → Topic
@@ -26,7 +28,8 @@
 #                                              global top-500 Topics by paper
 #                                              count (ONE request); still no hit
 #                                              → free-text query via
-#                                              GET /papers/search?q=&mode=auto
+#                                              GET /papers/search?q=&mode=semantic
+#                                              (override: --search-mode title|auto)
 #     (--deep-topic-scan forces an exhaustive per-Subfield walk for long-tail
 #      Topics outside the top-500: ~250 sequential requests, several minutes,
 #      and it eats the whole read:paper quota. Opt-in for a reason.)
@@ -124,6 +127,15 @@ YEAR_FROM_SET=0
 # only the returned list is longer — so there is no reason to run it at 1.
 SIMILAR=2
 SIMILAR_SET=0
+# Free-text targets pin the SEMANTIC layer. `mode=auto` runs the trgm title
+# layer first and ACCEPTS it at >=3 hits, so a research direction routinely
+# comes back as three literal title matches and the vector layer never runs —
+# measured 2026-08-18 on prod: "mixture of experts routing" auto = 19.6s / 3
+# rows vs pinned semantic = 5.1s / 20 rows; "causal inference with panel data
+# staggered adoption" auto = 23.6s vs 1.5s. That is both the thin-pool failure
+# this script used to warn about AND most of the "search is slow" complaint.
+# Override with --search-mode when the target really is a literal title.
+SEARCH_MODE=semantic
 APPEND=0
 OUT=""
 DO_SYNTH=1
@@ -132,13 +144,19 @@ THROTTLE="${PD_THROTTLE:-1.05}"
 DEEP_TOPIC_SCAN=0
 target_raw=""
 
-print_help() { sed -n '2,82p' "$0"; }
+print_help() { sed -n '2,85p' "$0"; }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --limit)      LIMIT=$2; shift 2 ;;
     --year-from)  YEAR_FROM=$2; YEAR_FROM_SET=1; shift 2 ;;
     --similar)    SIMILAR=$2; SIMILAR_SET=1; shift 2 ;;
+    --search-mode)
+      case "$2" in
+        semantic|title|auto) SEARCH_MODE=$2 ;;
+        *) echo "pd_worklist.sh: --search-mode must be semantic|title|auto" >&2; exit 2 ;;
+      esac
+      shift 2 ;;
     --paper)      SEED_PAPER=$2; shift 2 ;;
     --out)        OUT=$2; shift 2 ;;
     --throttle)   THROTTLE=$2; shift 2 ;;
@@ -342,7 +360,7 @@ resolve_taxon() {
     return 0
   fi
   # No taxonomy hit at all — treat as a free-text query for the layered
-  # search endpoint (GET /papers/search?q=&mode=auto, 0.8.0+).
+  # search endpoint (GET /papers/search?q=&mode=semantic by default, 0.8.0+).
   echo "pd_worklist.sh: no taxonomy match for '$raw' — falling back to /papers/search free-text query" >&2
   echo "query|$raw|$raw"
   return 0
@@ -364,7 +382,7 @@ if [[ -n "$SEED_PAPER" ]]; then
     cat >&2 <<EOF
 pd_worklist.sh: could not resolve seed paper '$SEED_PAPER' (see HTTP error above).
 A 404 means the paper is not in the corpus. Try locating it first:
-  GET \$PD_BASE/papers/search?q=<title words>&mode=auto
+  GET \$PD_BASE/papers/search?q=<title words>&mode=title
 or double-check the identifier (W-id / DOI / arXiv id all accepted).
 EOF
     exit 3
@@ -410,7 +428,18 @@ if [[ "$LEVEL" == "paper" ]]; then
 elif [[ "$LEVEL" == "query" ]]; then
   # Free-text query → layered search endpoint (0.8.0+): identifier→title→
   # semantic waterfall server-side; items carry match_layer + score.
-  papers_q="/papers/search?q=$(urlenc "$TAX_ID")&mode=auto&limit=${LIMIT}"
+  papers_q="/papers/search?q=$(urlenc "$TAX_ID")&mode=${SEARCH_MODE}&limit=${LIMIT}"
+  nwords=$(printf '%s' "$TAX_ID" | wc -w | tr -d ' ')
+  if [[ "$SEARCH_MODE" == "semantic" && "$nwords" -lt 4 ]]; then
+    cat >&2 <<EOF
+pd_worklist.sh: NOTE: "$TAX_ID" is $nwords word(s). The semantic layer reranks by
+  dominant-topic consensus, and a keyword-length query drags the whole batch into
+  the wrong cluster while still looking healthy (measured: "chain-of-thought
+  prompting" -> Educational-Leadership editorials at score 0.542; the same idea as
+  a full sentence put the real paper first at 0.759). Describe the direction in a
+  sentence, and check the top score / the why[] cluster below before trusting it.
+EOF
+  fi
   [[ -n "$YEAR_FROM" ]] && papers_q="${papers_q}&year_from=${YEAR_FROM}"
   if ! primary_json=$(pd_api GET "$papers_q"); then
     echo "pd_worklist.sh: /papers/search failed — a 404 here means the server predates 0.8.0 (no layered search); use a taxonomy name/id target instead" >&2
@@ -428,17 +457,38 @@ elif [[ "$LEVEL" == "query" ]]; then
     echo "pd_worklist.sh: no papers matched query '$TAX_ID' (try fewer/other words, or a taxonomy target)" >&2
     exit 0
   fi
-  # A thin pool is the failure mode this path actually has: the server's
-  # waterfall stops at the title layer as soon as it has ANY trgm hits, so a
-  # broad topic can come back with a handful of rows and never reach the
-  # semantic layer. Stage 1.5 then has nothing to converge from.
+  # Thin pool — only reachable now via --search-mode title|auto, since the
+  # default pins semantic. Kept because the auto waterfall accepts the title
+  # layer at >=3 hits and never reaches the vector layer.
   if [[ "$layer_used" == "title" && "$n_primary" -lt "$LIMIT" ]]; then
     cat >&2 <<EOF
 pd_worklist.sh: NOTE: the search stopped at the title layer with $n_primary/$LIMIT rows.
   The semantic layer was never reached, so this pool is probably thinner than the
-  corpus actually holds. If you need a wider pool: use fewer / less literal query
-  words, or take the best hit as a seed and run --paper <id> to expand by similarity.
+  corpus actually holds. Re-run without --search-mode (the default pins the
+  semantic layer), or take the best hit as a seed and run --paper <id>.
 EOF
+  fi
+  # Semantic-layer miss: the batch is full-length but landed in the wrong
+  # cluster. Both tells are in the response, so check them rather than reading
+  # row count as health. Measured: on-target top-1 scores 0.62-0.76; a
+  # keyword-length query scored 0.52-0.54 with a why[] cluster from an
+  # unrelated field.
+  if [[ "$layer_used" == "semantic" ]]; then
+    top_score=$(printf '%s' "$primary_json" | jq -r '[.items[].score // 0] | max // 0')
+    top_why=$(printf '%s' "$primary_json" | jq -r '[.items[].why // []] | flatten
+                   | map(select(startswith("in dominant cluster"))) | first // ""')
+    if awk -v s="$top_score" 'BEGIN{exit !(s < 0.60)}'; then
+      cat >&2 <<EOF
+pd_worklist.sh: WARNING: semantic top-1 score is $top_score (<0.60) — this query
+  probably did NOT hit the corpus, even though it returned $n_primary rows.
+  ${top_why:+Reranked cluster was: $top_why — is that your field?}
+  Rewrite the target as a longer, more specific sentence and re-run. Do NOT carry
+  a missed pool into stage 1.5; a full-length wrong-cluster pool looks healthy at
+  every downstream gate.
+EOF
+    else
+      echo "pd_worklist.sh: semantic top-1 score=$top_score ${top_why:+($top_why)}" >&2
+    fi
   fi
 else
   papers_q="/papers?${LEVEL}_id=${TAX_ID}&has_extraction=true&limit=${LIMIT}"

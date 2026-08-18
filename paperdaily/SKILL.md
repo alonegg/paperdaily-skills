@@ -1,12 +1,25 @@
 ---
 name: paperdaily
-description: Query the user's paperdaily research-paper service from the shell — fast, read-only lookups that answer in one shot. Use when the user wants the latest academic papers in a research field (e.g. "AI 今天有什么新论文", "show me recent finance papers"), asks about a specific researcher's recent work (e.g. "Bengio 最近发了啥"), wants paper recommendations with related-paper expansion, or asks for an LLM-synthesized digest of a research area. Not for deep reading: if the user wants the papers actually downloaded and read — 深度调研 / 精读 / a literature review with page-anchored citations, or "深读这篇论文" — use the `paperdaily-deep-research` skill instead, which runs the full fetch-and-read pipeline. Routes through ~/.paperdaily-cli/env (PD_BASE + PD_KEY). Query scenarios are read-only; the watchlist scenario writes (create/delete/run) and every write asks the user first.
+description: >-
+  Query the user's paperdaily research-paper service from the shell — fast,
+  read-only lookups that answer in one shot. Use when the user wants the latest
+  academic papers in a research field (for example "AI 今天有什么新论文" or
+  "show me recent finance papers"), asks about a specific researcher's recent
+  work (for example "Bengio 最近发了啥"), wants semantic search over a fuzzy
+  research direction that is not a taxonomy node, wants papers similar to one or
+  more given seed papers, or asks for an LLM-synthesized digest of a research
+  area. Not for deep reading — if the user wants the papers actually downloaded
+  and read — 深度调研 / 精读 / a literature review with page-anchored citations,
+  or "深读这篇论文" — use the paperdaily-deep-research skill instead, which runs
+  the full fetch-and-read pipeline. Routes through ~/.paperdaily-cli/env
+  (PD_BASE plus PD_KEY). Query scenarios are read-only; the watchlist scenario
+  writes (create/delete/run) and every write asks the user first.
 ---
 
 # paperdaily skill
 
 > **声明块（SKILL_SPEC §1）**
-> - **skill_ver**: `0.2.0`
+> - **skill_ver**: `0.3.0`
 > - **协议版本**: AGENT_PROTOCOL v1
 > - **所需 scopes**: `read:digest, read:paper, synth:ask`（默认，只读）；
 >   读用户收藏库（`GET /me/saves`）另需 `read:contrib`（个人数据，
@@ -16,13 +29,43 @@ description: Query the user's paperdaily research-paper service from the shell �
 
 Thin wrapper over the paperdaily v1 Bearer API.
 
-**Read vs write (read this before acting).** Three scenarios are pure
-queries — field digest, author papers, topic find. The fourth, watchlist,
-**mutates server state**: `create` and `delete` change the user's saved
-queries, and `run` triggers a scan that writes `watchlist_entries` and
-spends quota. Per `SKILL_SPEC.md` rule 4 every one of those three needs an
-explicit user OK first — "run is basically read-only" is not a valid excuse
-(it was written that way once; it was wrong).
+**Read vs write (read this before acting).** Four things here are pure
+queries — field digest, author papers, topic find, semantic search. The one
+write surface is watchlist (scenario 3), which **mutates server state**:
+`create` and `delete` change the user's saved queries, and `run` triggers a
+scan that writes `watchlist_entries` and spends quota. Per `SKILL_SPEC.md`
+rule 4 every one of those three needs an explicit user OK first — "run is
+basically read-only" is not a valid excuse (it was written that way once; it
+was wrong).
+
+**检索选路（先看这张表再动手）.** 走错通道是这个 skill 目前最贵的错误——
+既慢又召回不足，且**两种症状都不会报错**：
+
+| 用户诉求 | 走哪个 |
+|---|---|
+| 学科 / 子领域 / Topic 是 taxonomy 节点 | scenario 1 `field-digest.sh` |
+| 某个人最近发了什么 | scenario 2 `author-papers.sh` |
+| **模糊研究方向（不是 taxonomy 节点）** | **scenario 4 `semantic-search.sh`** |
+| **给了论文，要「跟这些像的」** | **scenario 4 `--paper <id>`** |
+| 要一段服务端生成的综述 | scenario 1 的 `/ask`（一次工作流最多一次） |
+
+判据与全部实测数字在 `references/semantic-search.md`。三条最容易踩的：
+**① 概念型查询必须钉 `mode=semantic`**（默认的 `mode=auto` 会先跑标题层，实测
+19.6s 只回 3 条，钉死后 5.1s 回 20 条）；**② 查询要写成一整句**（两词查询实测把
+CoT 论文的检索拽进「教育领导力」簇）；**③ `/ask` 是合成端点不是检索端点**——
+见下。
+
+**`/ask` 的定位（别读成"agent 不许用"）.** 协议里「agent 不走 /ask」是针对**检索**
+说的。它有三种正当用法：**① 合成**——你已经用结构化端点选定了论文，要一段成文的
+带引用叙述给用户（必须用 `load_extractions(paper_ids=[…])` 锚定你的清单，否则它会
+自己去检索，拿回一批 2018-2022 的综述当材料）；**② 够到 REST 没开的三个工具**——
+`find_community_overview` / `find_papers_by_venue` / `lookup_venue`，这三件事目前
+只有这一个门；**③ 把合成成本转移到服务端**（烧的是服务端 token 和积分，不是你的
+上下文）。代价是 p50 37-57s、无流式、10 积分、2 req/min，所以一次工作流最多一次。
+
+⚠️ **别为了拿抽取去调 `/ask`**：`POST /papers/batch`（≤100 id/次）直接返回
+`contributions / key_claims / methods / limitations / open_questions / tldr_zh`。
+15 个工具里 12 个都有 REST 门，完整对照表在 `references/semantic-search.md` §9。
 
 ## Pre-flight (do once per environment)
 
@@ -197,6 +240,60 @@ asks.
 
 Flags: `--limit N` (default 8), `--all-matches`, `--synth`.
 
+### 4 — Semantic search（模糊方向 / 种子论文找相似）
+
+用户说的是一个**研究方向**而不是学科名（「多智能体协作做代码审查的工作有哪些」
+「有没有人做用 LLM 判作业公平性的」），或者手里已经有几篇论文要「找像的」。
+这两件事共用一个脚本，因为它们的正确做法是同一套：钉死语义层 + 多通道并集 +
+孪生折叠。
+
+```sh
+S=~/.claude/skills/paperdaily/scenarios/semantic-search.sh
+
+# ① 模糊方向：先无 scope 探针，按返回的 subfield 分布自动收窄再跑一遍
+"$S" "retrieval augmented generation reduces hallucination in QA" --scope auto --limit 20
+
+# ② 要覆盖面：改写由你来写，中英文/术语白话各一条，脚本按 RRF 融合
+"$S" "large language models for personalized learning" \
+     --expand "LLM 个性化学习 自适应教学系统" \
+     --expand "AI tutor adaptive instruction student outcomes"
+
+# ③ 种子论文找相似：自动并 /similar 与语义两条通道，并排除种子自身与其孪生行
+"$S" --paper arxiv:2201.11903 --paper W7165154520 --limit 30
+
+# ④ 限定学科 + 时间窗；⑤ 交给下游
+"$S" "text as data methods in empirical economics" --scope 2002 --year-from 2023
+"$S" "graph neural networks for fraud detection" --json
+```
+
+脚本做的事：`GET /papers/search?mode=semantic`（**永远钉死，不用 auto**）
+→ 可选探针定 scope → 可选多改写扇出 → 逐 seed 的 `/papers/{id}/similar` +
+标题语义两通道 → RRF 融合 + 归一化标题折叠 → markdown 表或 `--json`。
+纯读、0 积分、不碰 `/ask`。
+
+读结果时按这三条判：
+
+1. **`命中通道数 ≥ 2` 的排在最前，优先读那些**。seed 模式下 `/similar` 与语义层
+   实测 20 条只重合 1 条，两条通道都投票的才是真核心件。
+2. **`sem 分` 和 `sim 近度` 是两个量纲，不要互相比大小**（前者是重排后的复合分，
+   0.62-0.76 算命中；后者是 1−余弦距离，0.97+ 是常态）。
+3. **top-1 的 `sem 分` < 0.60，或者 `why` 里的 dominant cluster 明显不是这个领域
+   → 这次没打中**。改写成更长更具体的一整句重跑，不要靠加 `--limit` 硬凑。
+
+几个会静默坑人的事实（全部实测，详见 `references/semantic-search.md`）：
+
+- **同一问题的多个改写往往零重叠**（实测 4 改写 × 20 篇 = 80 篇全不重复）。
+  所以扇出不是冗余劳动；但也别指望「多个改写都命中」当共识信号，那个集合通常是空的。
+- **单个种子的 top-30 邻域半径只有 ~0.02，而同一篇论文的两条记录相距 0.04** ——
+  所以单种子 `/similar` 给的是「最贴的那一小簇」，不是「相关工作」。要宽就加种子、
+  加改写。
+- **`k` 加到 40 以上无效**，HNSW 的 `ef_search` 默认把返回截在 ~38 条。
+- **中文诉求绝不能落到标题层**（实测标题层 0 条，语义层 20 条）。
+
+配额：`read:paper` 60/min。扇出 + 收窄 + 多种子一次就是 10+ 请求，脚本按 1.05s
+自节流并在 429 时按 `Retry-After` 退避。**第一次查询慢（冷缓存 4-25s）是正常的，
+不要重试**——重跑同一个查询热态只要 0.4-1.8s。
+
 ## What this skill does NOT do
 
 - **Mutate the user's interest profile** (follow topic, follow author,
@@ -256,5 +353,9 @@ Currently tracked open issue:
 - `scenarios/watchlist.sh` — CRUD + run-now for user-defined weekly
   topic-tracking jobs. Mutates state — see the
   hard rules in scenario 3.
+- `scenarios/semantic-search.sh` — scenario 4 (模糊方向语义检索 / 种子论文
+  相似扩张)。钉死 `mode=semantic`，多通道并集 + 孪生折叠。
+- `references/semantic-search.md` — 语义检索手册：选路决策表、八条铁律、
+  延迟与配额、五个场景的具体命令。全部数字为 2026-08-18 生产实测。
 - `references/v1-known-issues.md` — user-visible issues + workarounds, by
   stable letter id.

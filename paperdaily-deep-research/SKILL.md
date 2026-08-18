@@ -1,12 +1,28 @@
 ---
 name: paperdaily-deep-research
-description: Deep, citation-grounded literature research on the user's own paperdaily corpus — the skill that actually READS the papers instead of listing them. Pulls a candidate pool from paperdaily (taxonomy facets / layered search / seed-paper similarity), downloads the full-text PDFs locally through an open-access waterfall, fans out an agent team for page-anchored deep reads, synthesizes a method comparison + timeline + taxonomy + a four-state evidence ledger, and can upload the analysis back to the paperdaily workbench. Use it whenever the user wants a research direction 深度调研 / 精读 / 做成文献综述, hands over a seed paper ("深读这篇论文", "--paper <id>"), pastes a deep-read command copied from the paperdaily web UI, asks what their agent 收件箱 has queued, or wants a review where every claim carries a paper id and page number. For a quick lookup instead — "今天有什么新论文", a one-shot field digest, an author's recent work — use the lighter `paperdaily` skill: this one downloads PDFs and spawns reading sub-agents, so it is the right pick only when depth is the point. Credentials come from ~/.paperdaily-cli/env.
+description: >-
+  Deep, citation-grounded literature research on the user's own paperdaily
+  corpus — the skill that actually READS the papers instead of listing them.
+  Pulls a candidate pool from paperdaily (taxonomy facets, layered search,
+  seed-paper similarity), downloads the full-text PDFs locally through an
+  open-access waterfall, fans out an agent team for page-anchored deep reads,
+  synthesizes a method comparison plus timeline plus taxonomy plus a four-state
+  evidence ledger, and can upload the analysis back to the paperdaily workbench.
+  Use it whenever the user wants a research direction 深度调研 / 精读 /
+  做成文献综述, hands over a seed paper ("深读这篇论文", "--paper <id>"), pastes a
+  deep-read command copied from the paperdaily web UI, asks what their agent
+  收件箱 has queued, or wants a review where every claim carries a paper id and
+  page number. For a quick lookup instead — "今天有什么新论文", a one-shot field
+  digest, an author's recent work — use the lighter paperdaily skill instead.
+  This one is the right pick only
+  when depth is the point — it downloads PDFs and spawns reading sub-agents.
+  Credentials come from ~/.paperdaily-cli/env.
 ---
 
 # paperdaily-deep-research
 
 > **声明块（SKILL_SPEC §1）**
-> - **skill_ver**: `0.5.0`
+> - **skill_ver**: `0.5.1`
 > - **协议版本**: AGENT_PROTOCOL v1（`docs/api/AGENT_PROTOCOL.md`；检索走其 §2
 >   分层端点，收件箱走其 §5 任务协议）
 > - **所需 scopes**: `read:digest, read:paper, synth:ask`；阶段 0（可选收件箱）
@@ -75,11 +91,36 @@ agent、一段进入综合的上下文。所以在跑阶段 1 之前先用一句
 
 - **精准指向** → `GET /papers/resolve?id=`：任意标识符（W-id / DOI /
   arXiv id / URL 形态）→ 单篇或 404，响应带 `resolved_by`；
-- **模糊匹配** → `GET /papers/search?q=&mode=auto`：标识符→标题→语义
-  三层瀑布，结果带 `match_layer` 与 `score`（q= 无需 facet 过滤）；
+- **研究方向（本 skill 的主力入口）** → `GET /papers/search?q=&mode=semantic`
+  ——**钉死语义层，不要用默认的 `mode=auto`**。auto 的瀑布会先跑标题 trgm 层，
+  且**只要凑够 3 条命中就采纳、语义层再也不执行**：实测
+  `mixture of experts routing` 走 auto 是 19.6s / 3 条，钉死 semantic 是
+  5.1s / 20 条。阶段 1 的池子薄一半以上是这一条造成的，且**不报错**；
+- **确实要按标题定位某一篇** → `mode=title`；分不清用户给的是 id 还是词才用
+  `mode=auto`；
 - **拉池/浏览** → `GET /papers?subfield_id=…` 等 facet 列表与
   `GET /papers/{id}/similar` 相似扩张；
 - **不要**用 `/ask` 做检索，也不要拉全列表在客户端过滤模拟搜索。
+
+**但「不做检索」≠「不能用」**：`/ask` 是合成端点，本 skill 那一次 overview 调用就是
+它的正当用法（且**必须**用 `load_extractions(paper_ids=[…])` 锚定 worklist，否则它
+自己去检索，拿回的材料跟你的清单对不上）。另外三个工具——`find_community_overview`
+（GraphRAG 式领域预计算概览）/ `find_papers_by_venue` / `lookup_venue`——**REST 至今
+没开**，要用只能走 `/ask`。⚠️ 但**别为了拿抽取调它**：`POST /papers/batch`（≤100
+id/次）直接返回 `contributions / key_claims / methods / limitations /
+open_questions / tldr_zh`，比 `load_extractions` 更省。完整的 15 工具 → REST 对照表
+在 thin skill 的 `references/semantic-search.md` §9。
+
+**查询要写成一整句**：语义层按 dominant-topic 共识重排，查询太短会把整批结果拽进
+一个错误的簇且看起来完全正常。实测 `chain-of-thought prompting`（2 词）top-1 是
+一篇教育领导力短评（score 0.542，`why` 写着 dominant cluster
+`[Educational Leadership and Practices]`），而
+`chain-of-thought prompting elicits reasoning in large language models`
+把原论文排在第一（0.759）。**判「没打中」看两处**：top-1 `score` < 0.60，
+或 `why` 里的 dominant cluster 不是目标领域——两者都在响应里，零额外请求。
+
+更完整的检索规范（探针定 scope、多改写扇出、seed 双通道、k>38 截断、延迟与配额）
+见 thin skill 的 `references/semantic-search.md`；那份手册的数字与本节同源。
 
 ## Pre-flight（每个环境做一次）
 
@@ -155,7 +196,8 @@ scripts/pd_inbox.sh --claim <id> # 领取（pending → claimed）
 scripts/pd_worklist.sh "Artificial Intelligence"           # 默认 --limit 25 --similar 2，折叠后 ~35-50 篇候选池
 scripts/pd_worklist.sh 1702 --year-from 2025 --out ./pd-research/nlp/
 scripts/pd_worklist.sh T10270 --limit 20 --no-synth        # Topic id 直连，跳过综述
-scripts/pd_worklist.sh "graph neural fraud detection"      # 非 taxonomy 词 → /papers/search
+scripts/pd_worklist.sh "graph neural fraud detection"      # 非 taxonomy 词 → /papers/search?mode=semantic
+scripts/pd_worklist.sh "Attention Is All You Need" --search-mode title   # 就是要按标题定位那一篇
 scripts/pd_worklist.sh --paper arxiv:2605.10419            # 单篇种子模式
 scripts/pd_worklist.sh "graph neural fraud detection" --append   # 把第二批并进同一个池子
 ```
@@ -183,6 +225,20 @@ worklist，种子在首行（`source:"seed"`）；`--similar` 在此模式下不
 上限是 `limit+1`（种子 + limit 篇邻居），折叠又会**再砍掉**其中的孪生行
 （这个语料上常见 20-30%）。想要 N 篇就往多了要，从 `--limit $((N*3/2))`
 起步，然后看 `worklist rows written`——那是折叠后的数。
+
+**但 `--limit` 在这个模式下顶到 38 就没用了**：`/similar` 的 `k` 上限写着 50，
+而 HNSW 的 `ef_search` 默认值把实际返回截在 ~38 条（实测 k=40 回 38、k=50 也回
+38）。**那是索引参数不是语料边界**，别据此判断「这篇论文的相关工作就这么点」。
+
+**更要紧的是单种子的邻域比直觉窄得多**：实测某篇的邻居距离 rank-1 = 0.017、
+rank-30 = 0.027，而**同一篇论文的两条记录**（arXiv 版 vs OpenAlex W 版）之间就有
+0.0399——top-30 覆盖的半径比「同一篇的两个副本」的距离还小。后果是两篇明显相关的
+论文（实测 GPT-3 与 CoT）各自 top-30 邻居**零重叠**。所以单种子 `/similar` 给的
+是「最贴的那一小簇」，不是「相关工作」。要宽就并第二条通道：把种子标题送
+`GET /papers/search?q=<标题>&mode=semantic`（与 `/similar` 实测 20 条只重合 1 条，
+互补而非冗余），或者直接用 thin skill 的
+`scenarios/semantic-search.sh --paper <id> --paper <id2>`——它把两条通道并起来、
+按命中通道数排序，并会剔除种子自身及其孪生行。
 
 ## 孪生行折叠（0.4.2）
 
@@ -243,10 +299,18 @@ worklist，种子在首行（`source:"seed"`）；`--similar` 在此模式下不
 清单短是限流造成的，不是这个领域小。如实告诉用户丢了几篇，重跑或调大
 `--throttle` 后再进下一阶段——**不要拿一份缺行的清单当作检索结果去做综述**。
 
-**看到「stopped at the title layer」也要处理**：自由词句检索的服务端瀑布只要
-标题层有命中就不再往语义层走，于是一个很大的方向可能只回来几行。这时池子薄
-不代表语料薄。换更短/更宽的词重跑，或者拿最好的那篇当种子 `--paper <id>` 去
-扩张（0.4.2 起脚本会主动提示）。
+**自由词句检索现在钉死语义层（0.5.1）**：以前默认走 `mode=auto`，服务端瀑布
+只要标题层凑够 3 条命中就采纳、语义层再也不执行——于是一个很大的方向只回来几行，
+而且**还慢**。同一个查询实测：`mode=auto` 23.2s / 走完标题层才落到语义，
+`mode=semantic` 1.65s，结果集相同。所以标题层那 21.5 秒是纯白付。
+真要按标题定位某一篇时用 `--search-mode title`；`--search-mode auto` 保留为逃生口。
+
+**改成语义层之后，失败模式换了一种，必须换判据**：池子不会再薄，但可能**整批落进
+错误的簇**——行数满、看起来健康、每个下游 gate 都放行。脚本因此在检索后打印
+`semantic top-1 score=… (in dominant cluster […])`，并在 score < 0.60 时告警。
+看到那条告警**不要带着这个池子进阶段 1.5**：把目标改写成更长更具体的一整句重跑。
+实测打中的 top-1 在 0.62-0.76，没打中的在 0.52-0.54。查询短于 4 个词时脚本会先
+提醒——`chain-of-thought prompting`（2 词）实测把整批结果拽进「教育领导力」簇。
 
 **Phase gate → 阶段 1.5**：`worklist.jsonl` 存在、每行合法 JSON 且
 `doi`/`arxiv_id`/`oa_url` 至少一项非 null 的行占多数、**没有 INCOMPLETE 横幅**，

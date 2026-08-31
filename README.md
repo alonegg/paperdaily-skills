@@ -10,6 +10,7 @@
 |---|---|
 | [`paperdaily/`](paperdaily/) | thin 查询 skill：领域/学科/话题日报、作者近作、**语义检索**（模糊研究方向 / 给定论文找相似）、watchlist 周追踪。查询只读；watchlist 的 create/delete/run 是写操作，调用前必征得你同意（需 `write:profile`，按需索取）。 |
 | [`paperdaily-deep-research/`](paperdaily-deep-research/) | 深度调研 skill：从「一个领域 / 一篇种子论文」到「可溯源的深度文献综述」——平台检索推荐 → 本地 OA 全文瀑布下载 → agent team 逐篇精读 + 跨篇综合；可选把你自己的分析产物回传 paperdaily 工作台。 |
+| [`mcp/`](mcp/) | **MCP 服务**（非 skill）：`paperdaily-mcp` stdio 服务器，把 v1 API 的 24 个端点暴露为标准 MCP 工具，任何兼容 MCP 的助手（Claude Desktop / Claude Code / Cursor …）都能直接接入。安装与配置见 [`mcp/README.md`](mcp/README.md)。 |
 
 配套文档：
 
@@ -64,6 +65,21 @@ thin 查询 skill 的日常用法：
 判据与实测数字在 [`paperdaily/references/semantic-search.md`](paperdaily/references/semantic-search.md)：
 概念型查询要钉 `mode=semantic`（默认的 `mode=auto` 会先跑标题层，实测 19.6s 只回 3 条，
 钉死后 5.1s 回 20 条）、查询要写成一整句、单个种子的相似邻域比直觉窄得多。
+
+## MCP 接入（不装 skills 的另一条路）
+
+如果你的助手支持 MCP（Model Context Protocol），可以不装 skills，直接把 paperdaily 当成一个标准 MCP 服务接入：
+
+```sh
+# 安装（二选一）
+uv tool install paperdaily-mcp
+uv tool install --from 'git+https://github.com/alonegg/paperdaily-skills#subdirectory=mcp' paperdaily-mcp
+
+# 接入 Claude Code
+claude mcp add paperdaily -e PAPERDAILY_API_KEY=pd_live_你的key -- paperdaily-mcp
+```
+
+24 个工具覆盖日报、论文/作者检索、学科分类、相似论文、关注管理与语义问答（`paperdaily_ask`）。key、scope 与限流与上面 skills 用的完全是同一套（服务端统一执行）。Claude Desktop 等图形端配置与工具清单详见 [`mcp/README.md`](mcp/README.md)。
 
 ## 协议与规范
 

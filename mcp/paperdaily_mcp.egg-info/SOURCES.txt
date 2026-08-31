@@ -1,0 +1,9 @@
+README.md
+paperdaily_mcp.py
+pyproject.toml
+paperdaily_mcp.egg-info/PKG-INFO
+paperdaily_mcp.egg-info/SOURCES.txt
+paperdaily_mcp.egg-info/dependency_links.txt
+paperdaily_mcp.egg-info/entry_points.txt
+paperdaily_mcp.egg-info/requires.txt
+paperdaily_mcp.egg-info/top_level.txt

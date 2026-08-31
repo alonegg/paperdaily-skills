@@ -1,0 +1,154 @@
+# paperdaily MCP server — quickstart
+
+`paperdaily-mcp` is a stdio Model Context Protocol server that exposes
+the paperdaily v1 REST API as **24 agent tools**. Drop it into Claude
+Desktop / Claude Code / Cursor / any MCP-compatible runtime and the
+agent can auto-discover and call `paperdaily_get_digest_today`,
+`paperdaily_get_paper`, `paperdaily_ask`, etc. directly.
+
+It is a thin proxy: every tool call is forwarded as a typed HTTP request
+with your bearer key. Accounts, scopes and rate limits are the same ones
+the website uses — enforced server-side per key, nothing to configure in
+the client.
+
+## Install
+
+From PyPI (recommended):
+
+```bash
+uv tool install paperdaily-mcp
+# or
+pipx install paperdaily-mcp
+```
+
+From the public skills repo:
+
+```bash
+uv tool install \
+    --from 'git+https://github.com/alonegg/paperdaily-skills#subdirectory=mcp' \
+    paperdaily-mcp
+```
+
+Confirm the binary is reachable:
+
+```bash
+which paperdaily-mcp
+```
+
+## Get your API key
+
+Sign in at <https://www.paperdaily.org>, then go to **账号设置 → API
+Keys** (<https://www.paperdaily.org/account>) and issue a key. Pick the
+scopes you need — `read:digest, read:paper` cover all read tools, add
+`write:profile` for follow/feedback tools and `synth:ask` for
+`paperdaily_ask`. Keep the `pd_live_…` string — it is shown only once,
+and the MCP server reads it from the env on launch.
+
+## Configure Claude Desktop
+
+Open `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and
+add a `paperdaily` entry under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "paperdaily": {
+      "command": "paperdaily-mcp",
+      "env": {
+        "PAPERDAILY_API_KEY": "pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "PAPERDAILY_BASE_URL": "https://www.paperdaily.org"
+      }
+    }
+  }
+}
+```
+
+> `PAPERDAILY_BASE_URL` defaults to `https://www.paperdaily.org`; a
+> self-hosted deployment can point it at its own origin instead.
+
+Restart Claude Desktop. In a new conversation, open the tools list —
+you should see `paperdaily` with 24 tools.
+
+## Configure Claude Code
+
+```bash
+claude mcp add paperdaily \
+    -e PAPERDAILY_API_KEY=pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx \
+    -e PAPERDAILY_BASE_URL=https://www.paperdaily.org \
+    -- paperdaily-mcp
+```
+
+Verify:
+
+```bash
+claude mcp list
+# paperdaily — stdio — 24 tools
+```
+
+## Sanity check from the terminal
+
+The MCP server only relays HTTP, so the fastest end-to-end check is the
+API itself:
+
+```bash
+curl -sS -H "Authorization: Bearer pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" \
+    https://www.paperdaily.org/api/v1/taxonomy/fields | head -c 400
+```
+
+You should see the top OpenAlex fields with paper counts in the
+millions. If that works but the agent sees no tools, the problem is on
+the MCP config side (env not reaching the process, binary not on PATH).
+
+## The 24 tools
+
+Mirror the v1 REST surface 1:1. Names follow the
+`paperdaily_<verb>_<noun>` convention.
+
+| Tool | Scope | REST |
+|---|---|---|
+| `paperdaily_get_digest_today` | read:digest | `GET /digest/today` |
+| `paperdaily_get_digest_by_date` | read:digest | `GET /digest/{date}` |
+| `paperdaily_get_digest_today_papers` | read:digest | `GET /digest/today/papers` |
+| `paperdaily_list_papers` | read:paper | `GET /papers` |
+| `paperdaily_get_paper` | read:paper | `GET /papers/{id}` |
+| `paperdaily_get_paper_by_doi` | read:paper | `GET /papers/by-doi/{doi}` |
+| `paperdaily_get_paper_by_arxiv` | read:paper | `GET /papers/by-arxiv/{id}` |
+| `paperdaily_get_paper_authors` | read:paper | `GET /papers/{id}/authors` |
+| `paperdaily_get_paper_citations` | read:paper | `GET /papers/{id}/citations` |
+| `paperdaily_get_similar_papers` | read:paper | `GET /papers/{id}/similar` |
+| `paperdaily_search_authors` | read:paper | `GET /authors` |
+| `paperdaily_get_author` | read:paper | `GET /authors/{id}` |
+| `paperdaily_get_author_by_orcid` | read:paper | `GET /authors/by-orcid/{orcid}` |
+| `paperdaily_get_author_papers` | read:paper | `GET /authors/{id}/papers` |
+| `paperdaily_list_fields` | read:paper | `GET /taxonomy/fields` |
+| `paperdaily_list_subfields` | read:paper | `GET /taxonomy/subfields` |
+| `paperdaily_list_topics` | read:paper | `GET /taxonomy/topics` |
+| `paperdaily_get_profile` | write:profile | `GET /me/profile` |
+| `paperdaily_follow_topics` | write:profile | `POST /me/topics` |
+| `paperdaily_unfollow_topic` | write:profile | `DELETE /me/topics/{id}` |
+| `paperdaily_follow_authors` | write:profile | `POST /me/authors` |
+| `paperdaily_unfollow_author` | write:profile | `DELETE /me/authors/{id}` |
+| `paperdaily_record_feedback` | write:profile | `POST /me/feedback` |
+| `paperdaily_ask` | synth:ask | `POST /ask` |
+
+Quotas are enforced server-side per (key tier, scope) — the same table
+as the REST surface. 429 responses carry `Retry-After` and
+`X-RateLimit-*` headers. Full rate-limit and error-code reference:
+<https://www.paperdaily.org/docs/api/quickstart.html>.
+
+## Troubleshooting
+
+- **`PAPERDAILY_API_KEY env var is required`** — the env var isn't
+  reaching the server. Claude Desktop only honours `env:` inside the
+  `mcpServers` block; shell exports won't propagate.
+- **All tools return `HTTP 401`** — the key is rejected. Check the
+  prefix (`pd_live_…`), or list your keys on the account page to confirm
+  it isn't revoked.
+- **`HTTP 403` with `missing scope: …`** — the key wasn't issued with
+  that scope; add the scope on the account page (existing keys can be
+  edited) or issue a new key.
+- **`HTTP 422` on `paperdaily_list_papers` with `q=`** — `q=` requires
+  one of `topic_id` / `subfield_id` / `field_id`; add a facet to scope.
+- **`transport error`** — the binary couldn't reach
+  `PAPERDAILY_BASE_URL`. Test with the curl sanity check above.

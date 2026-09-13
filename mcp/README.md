@@ -1,7 +1,7 @@
 # paperdaily MCP server — quickstart
 
 `paperdaily-mcp` is a stdio Model Context Protocol server that exposes
-the paperdaily v1 REST API as **24 agent tools**. Drop it into Claude
+the paperdaily v1 REST API as **28 agent tools**. Drop it into Claude
 Desktop / Claude Code / Cursor / any MCP-compatible runtime and the
 agent can auto-discover and call `paperdaily_get_digest_today`,
 `paperdaily_get_paper`, `paperdaily_ask`, etc. directly.
@@ -68,7 +68,7 @@ add a `paperdaily` entry under `mcpServers`:
 > self-hosted deployment can point it at its own origin instead.
 
 Restart Claude Desktop. In a new conversation, open the tools list —
-you should see `paperdaily` with 24 tools.
+you should see `paperdaily` with 28 tools.
 
 ## Configure Claude Code
 
@@ -83,7 +83,7 @@ Verify:
 
 ```bash
 claude mcp list
-# paperdaily — stdio — 24 tools
+# paperdaily — stdio — 28 tools
 ```
 
 ## Sanity check from the terminal
@@ -100,7 +100,7 @@ You should see the top OpenAlex fields with paper counts in the
 millions. If that works but the agent sees no tools, the problem is on
 the MCP config side (env not reaching the process, binary not on PATH).
 
-## The 24 tools
+## The 28 tools
 
 Mirror the v1 REST surface 1:1. Names follow the
 `paperdaily_<verb>_<noun>` convention.
@@ -131,6 +131,32 @@ Mirror the v1 REST surface 1:1. Names follow the
 | `paperdaily_unfollow_author` | write:profile | `DELETE /me/authors/{id}` |
 | `paperdaily_record_feedback` | write:profile | `POST /me/feedback` |
 | `paperdaily_ask` | synth:ask | `POST /ask` |
+| `paperdaily_find_datasets` | read:paper | `GET /datasets/search` |
+| `paperdaily_get_dataset` | read:paper | `GET /datasets/{registry_id}` |
+| `paperdaily_get_dataset_narrative` | read:paper | `GET /datasets/{registry_id}/narrative` |
+| `paperdaily_list_datasets_for_subfield` | read:paper | `GET /datasets/by-subfield/{id}` |
+
+The four dataset tools read the **curated dataset registry** (human
+review gate: nothing enters without a proposal approved by a different
+identity). Their counts come from this corpus's LLM extractions — they
+are *not* a literature census, and coverage varies by field and year.
+Ordering is by **usage frequency, not recommendation**: `n_hits` /
+`n_in_scope` say how often a dataset shows up, never how good it is for
+your question. Each tool description repeats these caveats so an agent
+that only sees the tool list still gets them.
+
+`paperdaily_get_dataset_narrative` is the one exception to "everything
+here is an extracted fact": it returns an **AI synthesis** — the research
+questions the dataset has been used to answer, the recurring research
+designs, and a reading path — generated weekly by a local LLM over the
+dataset's member papers. Every claim carries the papers it came from, and
+claims whose citations could not be verified against those papers are
+discarded before storage, so an empty section means *nothing verifiable*,
+never *nothing exists*. Pass `ai_label_en` along with anything you quote
+from it, and treat the member papers, not the synthesis, as the source.
+`status` is `published` / `absent` (never generated — too few member
+papers, or the weekly job hasn't reached it) / `hidden` (withdrawn by a
+human); the last two return 200 with empty arrays.
 
 Quotas are enforced server-side per (key tier, scope) — the same table
 as the REST surface. 429 responses carry `Retry-After` and
@@ -150,5 +176,14 @@ as the REST surface. 429 responses carry `Retry-After` and
   edited) or issue a new key.
 - **`HTTP 422` on `paperdaily_list_papers` with `q=`** — `q=` requires
   one of `topic_id` / `subfield_id` / `field_id`; add a facet to scope.
+- **`HTTP 503` on `paperdaily_find_datasets`** — the embedding service is
+  down. The endpoint deliberately fails loudly instead of returning an
+  empty list: "no dataset matches this question" is a claim, and it would
+  be a false one.
+- **`paperdaily_find_datasets` returns few items but a long
+  `unregistered` list** — the retrieved papers do use data, it just is
+  not registered yet. The registry's first batch covers economics /
+  social science / education / psychology only; CS benchmarks stay on the
+  legacy `/api/tags/datasets` view.
 - **`transport error`** — the binary couldn't reach
   `PAPERDAILY_BASE_URL`. Test with the curl sanity check above.

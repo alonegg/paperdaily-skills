@@ -1,8 +1,28 @@
 # paperdaily-deep-research
 
 paperdaily 平台的公开 Claude Code skill：从「一个研究领域」到「一份可
-溯源的深度文献综述」——平台检索推荐 + 本地全文获取 + agent team 深度
-分析，三阶段流水线。
+溯源的深度文献综述」——平台检索推荐 + 章节归纳与反向路由 + 本地全文
+获取 + agent team 按节深读，四阶段流水线。
+
+```
+阶段 0   收件箱（可选） pd_inbox.sh         → 用户在 web 排的任务 → 种子论文
+阶段 1a  检索          pd_worklist.sh      → worklist.jsonl（+ /ask 背景综述）
+阶段 1b  归纳章节      agent（LLM）        → taxonomy.json
+阶段 1c  反向路由      agent（10 篇一批）   → routing.jsonl
+阶段 1d  确定性校验    pd_route_check.py   → 覆盖率/孤儿节点 + 重写 overview.md
+阶段 1.5 按节收敛      与用户一起挑         → worklist.selected.jsonl
+阶段 2   全文获取      fetch_fulltext.py   → pdfs/*.pdf + fetch_report.jsonl
+                     pd_browser_fetch.py
+阶段 3a  逐篇精读      agent team（按节派工）→ notes/<paper_id>.md
+阶段 3b  按节综合      主会话               → synthesis/* + report.md
+阶段 4   回传（可选）  upload_session.py   → paperdaily 工作台 reading session
+```
+
+阶段 1b–1d 是 0.6.0 新加的：先把平的候选池归纳成 3–8 个章节、把每篇论文
+反向路由进去（每篇 0–3 节）、再机械校验一遍（未知 id / 未知节点 / 超过
+3 节 / 孤儿节点 / 覆盖率），后面的收敛、派工、综合全部按同一个结构走。
+形状与提示词见 `references/taxonomy-routing.md`，填满了的实例见
+`references/examples/`。
 
 ## 安装
 
@@ -32,6 +52,14 @@ export PD_FETCH_CDP=1                                     # 让瀑布自动用�
 
 # ② 先分诊再决定读哪些（只查不下载）
 python3 scripts/fetch_fulltext.py --worklist w.jsonl --out pdfs/ --triage
+```
+
+阶段 1d 的校验器不需要 key、不发网络请求，可以直接拿样例跑一遍看它长什么样：
+
+```sh
+python3 scripts/pd_route_check.py --dir references/examples            # 退 0
+python3 scripts/pd_route_check.py --dir references/examples \
+        --routing routing.broken.jsonl                                 # 退 2，每种错各一条
 ```
 
 闭源期刊的经管法论文，DOI 只登记在付费正刊版上，Unpaywall/PMC 一律

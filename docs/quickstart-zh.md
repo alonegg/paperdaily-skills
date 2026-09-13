@@ -129,6 +129,8 @@ curl -H "Authorization: Bearer $PD_KEY" \
 | `tldr_zh` / `tldr_en` / `elevator_pitch` | 一句话摘要（中 / 英 / ≤25 字电梯版） |
 | `key_claims` | 主要论点数组（每条带 claim / type / evidence） |
 | `contributions` / `methods` / `datasets` / `limitations` / `open_questions` / `applicable_to` | LLM 抽取的结构化字段 |
+| `identification` | 实证论文的识别策略：`{strategy, description_zh, description_en}`，`strategy` 取值 `DiD｜IV｜RDD｜RCT｜event-study｜structural｜matching｜panel-FE｜other｜none`。**v2 抽取 schema 独有**——约 1/4 的已抽取论文才带这个块，其余返回 `null`；`null` 是「不知道」不是「没有识别策略」。按发表年分组统计前必须同时分层抽取 schema 版本，否则 schema 上线的波前会被读成结构断点 |
+| `sample` | 实证论文的样本框：`{period, region, unit}`（自由文本，如 `{"period":"2000-2019","region":"China","unit":"firm-year"}`）。与 `identification` 同为 v2-only，单个键也可能缺 |
 | `primary_topic` | OpenAlex 4 层学科链（Domain → Field → Subfield → Topic） |
 | **`has_pdf`** | PDF 是否已被 paperdaily 解析并缓存 |
 | **`pdf_status`** | `parsed`／`no_oa_url`／`download_failed`／`mineru_failed`／`permanent_failure`／`null` |

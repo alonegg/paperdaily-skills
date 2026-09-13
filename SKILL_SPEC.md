@@ -42,7 +42,7 @@ report.md / overview.md   综述
 | skill | skill_ver | 协议版本 | 符合性 |
 |---|---|---|---|
 | paperdaily（thin） | 0.3.0 | v1 | 2026-08-18 语义检索整改：新增 scenario 4 `semantic-search.sh` + `references/semantic-search.md`（条 7 的落地件——此前 thin skill 完全没有语义检索通道，模糊方向只能被硬塞进 taxonomy 解析）。frontmatter `description` 改 YAML folded block（`>-`）并清掉 colon-space，修某些 skill 加载器解析失败整条跳过的问题。<br>0.2.0 起：2026-07-26 自查通过（声明件补齐；条 4 同意点整改——watchlist 三个写动作全部改为显式确认、`write:profile` 改 just-in-time 索取；偏差见下节） |
-| paperdaily-deep-research | 0.5.1 | v1 | 2026-08-18：阶段 1 自由词句检索由 `mode=auto` 改为**钉死 `mode=semantic`**（`--search-mode` 可覆盖），并把「池子薄」告警换成「语义没打中」告警（top-1 score < 0.60 或 dominant cluster 不对）——auto 的标题层在 ≥3 条命中时被采纳、语义层永不执行，同一查询实测 23.2s/走完标题层 vs 1.65s，结果集相同。frontmatter 同步改 folded block。<br>0.4.2 起：2026-07-27 复查通过（0.4.0 质量整改：阶段 3a 派工规程落成 reference、阶段 1.5 清单收敛入流程、限流按 60/min 口径自节流 + Retry-After 退避 + 丢行不再静默、回传面披露发芽/积分/session 上限并转达 `unknown_paper_ids`。0.4.1 吃对照评测暴露的六条：**孪生行折叠**（同一论文以 arXiv id 与 OpenAlex W-id 双份进池，会把 `weak` 假升成 `supported`，实测 16 行=12 篇）、stderr 逐行 flush、阶段 1.5 选取自检、`anchor_coverage` 定死分母口径、种子模式 `--limit` off-by-one、worklist 行规范形状文档化；剩余不满足项如实列于下节「已知偏差」）。0.4.2 吃第二轮对照评测暴露的十条：孪生折叠补两类漏网（`oa_url` 派生 arXiv 号 / 同一篇挂不同 DOI 走标题归一，18 行=13 篇实测）+ 落 `worklist.twins.jsonl` 审计 + **收回 0.4.1 那句兑现不了的「rows written = 不重复篇数」保证**；`--similar` 默认回 2（1 会因最近邻是孪生顶点而静默零扩张，0.4.0 回归）；新增 `--append`（此前文档说可追加批次而脚本实为覆盖）；title 层薄池告警 + 阶段 1 gate 加「池 ≥ 2× 深读数」；账本拆出 `miss` 态（404/查无记录不再冒充 `denied`）；fetch 进度改开工即打；`anchor_coverage` 分母上限 18 写进派工模板；补 `decisions.md` 进产物树、`report.md` 撞 harness 护栏的对策、claims 三闸门合表、`fetch_report.jsonl` 主键名澄清 |
+| paperdaily-deep-research | 0.6.1 | v1 | 2026-09-14（0.6.1）：阶段 1b/1c 的 **org 视图补上 `identification` / `sample`**——服务端 v0.9.26 起 `PaperDetail`（含 `POST /papers/batch`）导出了这两个字段，此前 `references/taxonomy-routing.md` §3 里那条「抽取 schema 里有、v1 没导出、skill 侧拿不到」的形状不对称说明作废。经管法的章节划分常按识别策略走，所以它们值得进默认视图。同时写清两条误读防线：两个块只存在于 v2 抽取 schema（约 1/4 的已抽取论文才有，`null` = 不知道 ≠ 没有识别策略），且带值的那批里 `strategy` 多半是 `none` ⇒ **能切章节不能做统计**，按发表年分组会把 schema 上线的波前读成假结构断点。<br>2026-09-13（0.6.0）：阶段 1 拆成 **1a 检索 / 1b 归纳章节 / 1c 反向路由 / 1d 确定性校验**，新增 `taxonomy.json` + `routing.jsonl` 两个工件（JSON 形状与服务端 `llm/survey/` 同一契约，写在 `references/taxonomy-routing.md`）与校验脚本 `scripts/pd_route_check.py`（纯标准库、只读、退出码 0/1/2/3 就是判据：未知 paper_id / 未知节点 / >3 节点 / 重复 / 孤儿 analytical 节点 / coverage<0.6）。阶段 1.5 改**按节收敛**并第一次有了机检（对收敛后的清单重跑同一个脚本、要求 coverage=1.0 且无孤儿节点——这补上了下节「已知偏差 1」里「阶段 1.5 收敛判据只在文字层」的一半）；阶段 3a fan-out 由**按篇**改**按节**（子 agent 拿到节点的 `key_questions` + 它的主属论文，`nodes[0]` 定主属保证「一篇只读一次」、3a→3b 的笔记数 gate 不变）；3b 按节综合，四件套第 3 件直接就是 `taxonomy.json` 而不再临时发明结构。`overview.md` 改成「taxonomy + 路由表」，1a 的 `/ask` 综述保留在文末作 provenance（文件名不变，条 8）。样例工件与反例在 `references/examples/`，仓库测试 `tests/test_pd_route_check.py` 与文档读同一份 fixture。<br>0.5.1 起：2026-08-18：阶段 1 自由词句检索由 `mode=auto` 改为**钉死 `mode=semantic`**（`--search-mode` 可覆盖），并把「池子薄」告警换成「语义没打中」告警（top-1 score < 0.60 或 dominant cluster 不对）——auto 的标题层在 ≥3 条命中时被采纳、语义层永不执行，同一查询实测 23.2s/走完标题层 vs 1.65s，结果集相同。frontmatter 同步改 folded block。<br>0.4.2 起：2026-07-27 复查通过（0.4.0 质量整改：阶段 3a 派工规程落成 reference、阶段 1.5 清单收敛入流程、限流按 60/min 口径自节流 + Retry-After 退避 + 丢行不再静默、回传面披露发芽/积分/session 上限并转达 `unknown_paper_ids`。0.4.1 吃对照评测暴露的六条：**孪生行折叠**（同一论文以 arXiv id 与 OpenAlex W-id 双份进池，会把 `weak` 假升成 `supported`，实测 16 行=12 篇）、stderr 逐行 flush、阶段 1.5 选取自检、`anchor_coverage` 定死分母口径、种子模式 `--limit` off-by-one、worklist 行规范形状文档化；剩余不满足项如实列于下节「已知偏差」）。0.4.2 吃第二轮对照评测暴露的十条：孪生折叠补两类漏网（`oa_url` 派生 arXiv 号 / 同一篇挂不同 DOI 走标题归一，18 行=13 篇实测）+ 落 `worklist.twins.jsonl` 审计 + **收回 0.4.1 那句兑现不了的「rows written = 不重复篇数」保证**；`--similar` 默认回 2（1 会因最近邻是孪生顶点而静默零扩张，0.4.0 回归）；新增 `--append`（此前文档说可追加批次而脚本实为覆盖）；title 层薄池告警 + 阶段 1 gate 加「池 ≥ 2× 深读数」；账本拆出 `miss` 态（404/查无记录不再冒充 `denied`）；fetch 进度改开工即打；`anchor_coverage` 分母上限 18 写进派工模板；补 `decisions.md` 进产物树、`report.md` 撞 harness 护栏的对策、claims 三闸门合表、`fetch_report.jsonl` 主键名澄清 |
 
 ## 已知偏差（thin 0.2.0 自查，2026-07-26）
 
@@ -61,14 +61,16 @@ report.md / overview.md   综述
 自查口径：对照上文十条逐条核对 `skills/paperdaily-deep-research/` 的 SKILL.md
 与三个脚本。满足项不赘述；以下为**仍不满足或仅部分满足**的条目：
 
-1. **条 2（phase-gate 可机检）——部分满足**。阶段 1→1.5（worklist 行数/字段
-   完备率 + INCOMPLETE 横幅）与阶段 4 入口（notes/claims/report 完备性 +
-   evidence 非空率）有脚本机检（fetch_fulltext 的输入校验、upload_session 的
-   回传门）；但阶段 1.5 的收敛判据（8-15 篇）、2→3（fetch 覆盖率 6 成）与
-   3a→3b（notes 数 = 参与深读篇数）的 gate 只写在 SKILL.md 文字层，由执行
-   agent 自查，无独立校验脚本。0.4.0 把 3a 的笔记质量判据（`anchor_coverage`
-   ≥80%、depth 与 fetch 账本一致）做成了子 agent 的结构化回传字段，比纯文字
-   判据可核，但仍由主 agent 执行，不是脚本。
+1. **条 2（phase-gate 可机检）——部分满足（0.6.0 补了一格）**。阶段 1a→1b
+   （worklist 行数/字段完备率 + INCOMPLETE 横幅）、**1d→1.5（`pd_route_check.py`
+   的结构与 coverage 判据，0.6.0 新增）**、**1.5→2（对收敛后的清单重跑同一个
+   脚本，要求 coverage=1.0 且无孤儿 analytical 节点，0.6.0 新增）**与阶段 4 入口
+   （notes/claims/report 完备性 + evidence 非空率）有脚本机检；但阶段 1.5 的
+   **规模**判据（8-15 篇）、2→3（fetch 覆盖率 6 成）与 3a→3b（notes 数 = 参与
+   深读篇数）的 gate 仍只写在 SKILL.md 文字层，由执行 agent 自查，无独立校验
+   脚本。0.4.0 把 3a 的笔记质量判据（`anchor_coverage` ≥80%、depth 与 fetch
+   账本一致）做成了子 agent 的结构化回传字段，比纯文字判据可核，但仍由主
+   agent 执行，不是脚本。
 2. **条 3（provenance 强制）——部分满足**。回传 payload 的 `provenance`
    完整（kind/skill_ver/model/taxonomy/worklist_fingerprint）；
    `worklist.meta.json` 侧车（0.2.0 新增）带检索目标 + created_at。但中间

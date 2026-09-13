@@ -2,7 +2,7 @@
 
 Run locally (Claude Desktop, Claude Code, Cursor, …) and proxy each MCP
 tool call to `https://www.paperdaily.org/api/v1/*` over HTTP with the
-user's bearer key. The agent runtime auto-discovers 24 tools via
+user's bearer key. The agent runtime auto-discovers 28 tools via
 `list_tools`; each call is forwarded as a typed HTTP request. Accounts,
 scopes, and rate limits are the same ones the website uses — enforced
 server-side per key; this binary carries no policy of its own.
@@ -85,6 +85,17 @@ def _t(
         "body_params": body_params,
         "tool": types.Tool(name=name, description=description, inputSchema=schema),
     }
+
+
+# Repeated verbatim in every dataset tool description (design doc §1 R3 / R4 /
+# R6). The agent only ever sees the tool list, so the caveat has to travel with
+# the tool, not live in a doc it will never open.
+_COVERAGE = (
+    "Counts are this corpus's LLM extractions, NOT a literature census — "
+    "coverage varies by field and year. Registry entries are human-reviewed "
+    "(propose \u2192 a different identity approves); ordering is by usage "
+    "frequency, NOT by recommendation or quality."
+)
 
 
 _TOOLS: list[dict[str, Any]] = [
@@ -173,7 +184,12 @@ _TOOLS: list[dict[str, Any]] = [
         "GET",
         "/api/v1/papers/{paper_id}",
         description="Full paper detail: metadata, 4-layer topic chain, LLM extraction "
-        "(tldr_zh, key_claims, methods, …) if computed, and data-quality flags.",
+        "(tldr_zh, key_claims, methods, datasets, identification, sample, …) if "
+        "computed, and data-quality flags. `identification` "
+        "({strategy: DiD|IV|RDD|RCT|event-study|structural|matching|panel-FE|other|none, "
+        "description_zh, description_en}) and `sample` ({period, region, unit}) come from "
+        "the v2 extraction schema only — null on most rows, and null means unknown, "
+        "not \"no identification strategy\".",
         path_params=("paper_id",),
         schema={
             "type": "object",
@@ -472,6 +488,122 @@ _TOOLS: list[dict[str, Any]] = [
                 },
                 "reason": {"type": "string"},
                 "report_date": {"type": "string", "description": "ISO date, optional"},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    # ─── datasets (read:paper) ──────────────────────────────────────
+    #
+    # Every description carries the same three caveats on purpose. An agent
+    # sees the tool list, not this file, and the caveats are exactly the
+    # design doc's R3 / R4 / R6 gates: a count that arrives without its
+    # basis gets quoted as "the literature says", and a frequency ranking
+    # without its label gets quoted as "the best dataset for X".
+    _t(
+        "paperdaily_find_datasets",
+        "GET",
+        "/api/v1/datasets/search",
+        description="Question-first dataset search: give it a research question "
+        "(\"minimum wage and employment\", \"数字金融与家庭消费\") and it returns the "
+        "datasets that the most semantically relevant papers in this corpus actually "
+        "used, each with `n_hits` (how many of the retrieved papers used it), a "
+        "template `why` sentence, and up to 3 example papers. `unregistered` lists "
+        "dataset tags seen in those papers that have no registry entry yet. "
+        "Optional `field` / `subfield` are OpenAlex ids that narrow the retrieval. "
+        + _COVERAGE
+        + " Returns 503 (not an empty list) when the embedding service is down.",
+        query_params=("q", "field", "subfield", "limit"),
+        schema={
+            "type": "object",
+            "required": ["q"],
+            "properties": {
+                "q": {
+                    "type": "string",
+                    "minLength": 2,
+                    "maxLength": 300,
+                    "description": "research question or keywords",
+                },
+                "field": {"type": "string", "description": "OpenAlex Field id, e.g. 20"},
+                "subfield": {"type": "string", "description": "OpenAlex Subfield id, e.g. 2003"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
+            },
+            "additionalProperties": False,
+        },
+    ),
+    _t(
+        "paperdaily_get_dataset",
+        "GET",
+        "/api/v1/datasets/{registry_id}",
+        description="One dataset's asset card by registry slug (e.g. `chfs`, `cfps`, "
+        "`pisa`): FAIR fields (owner, coverage period, access mode + URL, licence, how "
+        "to cite, campus availability), wave/version children, the paper_tags aliases "
+        "that feed the counts, and aggregates — per-year usage with an extraction-rate "
+        "baseline, subfield mix, sample period/region/unit histograms, identification "
+        "strategies, co-occurring methods and datasets, and ranked exemplar papers. "
+        "`methodology` spells out how every number was produced. "
+        + _COVERAGE,
+        path_params=("registry_id",),
+        schema={
+            "type": "object",
+            "required": ["registry_id"],
+            "properties": {
+                "registry_id": {
+                    "type": "string",
+                    "description": "registry slug, e.g. chfs (get it from paperdaily_find_datasets)",
+                }
+            },
+            "additionalProperties": False,
+        },
+    ),
+    _t(
+        "paperdaily_get_dataset_narrative",
+        "GET",
+        "/api/v1/datasets/{registry_id}/narrative",
+        description="**AI synthesis, not extracted facts** — what research questions "
+        "this dataset has been used to answer, the recurring research designs "
+        "(dataset x identification strategy x sample unit), and an origin -> classic "
+        "-> recent reading path. Written by an LLM over the dataset's member papers "
+        "and regenerated weekly; served from cache. Every claim carries the papers it "
+        "was drawn from, and claims whose citations could not be verified against "
+        "those papers are dropped before storage — so an empty section means "
+        "\"nothing verifiable\", never \"nothing exists\". **Quote `ai_label_en` "
+        "whenever you pass any of this on, and defer to the original papers**; the N "
+        "in that label is how many papers were fed to the model, not the dataset's "
+        "total. `status` is `published` / `absent` (never generated) / `hidden` "
+        "(withdrawn by a human) — the last two return 200 with empty arrays. "
+        + _COVERAGE,
+        path_params=("registry_id",),
+        schema={
+            "type": "object",
+            "required": ["registry_id"],
+            "properties": {
+                "registry_id": {
+                    "type": "string",
+                    "description": "registry slug, e.g. chfs (get it from paperdaily_find_datasets)",
+                }
+            },
+            "additionalProperties": False,
+        },
+    ),
+    _t(
+        "paperdaily_list_datasets_for_subfield",
+        "GET",
+        "/api/v1/datasets/by-subfield/{subfield_id}",
+        description="Reverse entry point: which registered datasets the papers of one "
+        "OpenAlex Subfield actually use. Each row carries `n_in_scope` (papers of that "
+        "dataset sitting in this subfield — the sort key), `n_papers` (its total here) "
+        "and `share`. Read all three: `n_in_scope` alone puts a global dataset like WDI "
+        "first in every field, `share` alone lets a 3-paper dataset impersonate a "
+        "workhorse. "
+        + _COVERAGE,
+        path_params=("subfield_id",),
+        query_params=("limit",),
+        schema={
+            "type": "object",
+            "required": ["subfield_id"],
+            "properties": {
+                "subfield_id": {"type": "string", "description": "OpenAlex Subfield id, e.g. 2003"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 100, "default": 20},
             },
             "additionalProperties": False,
         },

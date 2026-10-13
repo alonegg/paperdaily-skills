@@ -228,6 +228,27 @@ curl -H "Authorization: Bearer $PD_KEY" \
 
 ### 更新兴趣画像
 
+通过 Agent 说“把我的研究兴趣同步到 PaperDaily”，可以提交一段已有的研究兴趣描述，由服务端按网页相同流程抽取并保存。需要 API Key 的 `write:profile` scope；MCP 对应工具为 `paperdaily_update_profile`。
+
+```bash
+curl --max-time 180 -X PUT https://www.paperdaily.org/api/v1/me/profile \
+  -H "Authorization: Bearer $PD_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"natural_language":"我关注因果推断在劳动经济学中的应用，特别是工具变量和断点回归。"}'
+```
+
+`natural_language` 必须非空白、最多 8000 字符。服务端身份固定为 key 所属用户，不接受 `user_id` 等额外字段。此操作**替换原自然语言描述、主题兴趣和方法关键词**；作者关注、收藏与反馈保留。返回保存后的 `user_id`、`natural_language`、`topic_interests`、`method_keywords`，另附 `report_rebuild`：
+
+| `report_rebuild.status` | 含义 |
+|---|---|
+| `rebuilding` | 已调度或已有今日日报重建任务；`existing` 标明是否已有任务，尚不代表生成完成 |
+| `throttled` | 画像已保存，但重建受网页相同的 5 分钟节流限制；`retry_after_seconds` 提示剩余时间 |
+| `unavailable` | 画像已保存，但此次重建服务不可用；正常每日任务仍会读取新画像 |
+
+画像保存和变更审计同事务；抽取/事务失败不启动重建。接口不发送邮件。网络超时可能发生在提交之后，**先 `GET /api/v1/me/profile` 对照 `natural_language`，不要自动重新提交**。报告可稍后通过 `GET /api/v1/digest/today` 回看（需要 `read:digest`），先前已存在的日报不等于本次重建已完成。
+
+如果只想增量调整某个主题，继续使用以下关注入口：
+
 关注一个 topic（明天的 digest 会权重更高）：
 
 ```bash
@@ -438,7 +459,7 @@ for pid in ["W4404012345", "W4404012346", "W4404012347"]:
 | `read:paper` | 单篇详情 + 相似 + resolve/search 检索（`/papers/*`）——**全库语料**，不含你的个人数据 | ✅ |
 | `read:contrib` | 读**你自己的**收藏库与阅读状态（`GET /me/saves`、`/contrib/read-state`，0.8.6） | ✅ |
 | `write:contrib` | 回传阅读行为（`/contrib/read-events`，桌面/阅读器客户端用） | ✅ |
-| `write:profile` | 改兴趣画像（`/me/topics`, `/me/authors`, `/me/feedback`） | ✅ |
+| `write:profile` | 改兴趣画像（`PUT /me/profile`, `/me/topics`, `/me/authors`, `/me/feedback`） | ✅ |
 | `synth:ask` | LLM 综合提问（`/ask`） | ❌ 需手动勾 |
 | `read:reading` | 深读 session 回读（`GET /me/reading-sessions*`，0.8.0） | ✅ |
 | `write:reading` | 深读产物上传（`POST /me/reading-sessions`，0.8.0） | ❌ 需手动勾 |
@@ -504,6 +525,7 @@ for pid in ["W4404012345", "W4404012346", "W4404012347"]:
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | GET | `/me/profile` | 当前画像完整快照 |
+| PUT | `/me/profile` | 自然语言画像抽取、替换保存并请求重建今日报告 |
 | GET | `/me/topics` | 关注的 topic 列表 |
 | POST | `/me/topics` | 关注一批 topic |
 | DELETE | `/me/topics/{topic_id}` | 取消关注 |

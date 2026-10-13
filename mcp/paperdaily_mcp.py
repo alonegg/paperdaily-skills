@@ -2,7 +2,7 @@
 
 Run locally (Claude Desktop, Claude Code, Cursor, …) and proxy each MCP
 tool call to `https://www.paperdaily.org/api/v1/*` over HTTP with the
-user's bearer key. The agent runtime auto-discovers 28 tools via
+user's bearer key. The agent runtime auto-discovers 29 tools via
 `list_tools`; each call is forwarded as a typed HTTP request. Accounts,
 scopes, and rate limits are the same ones the website uses — enforced
 server-side per key; this binary carries no policy of its own.
@@ -75,6 +75,8 @@ def _t(
     query_params: tuple[str, ...] = (),
     body_params: tuple[str, ...] = (),
     schema: dict[str, Any],
+    timeout_s: float | None = None,
+    annotations: types.ToolAnnotations | None = None,
 ) -> dict[str, Any]:
     return {
         "name": name,
@@ -83,7 +85,10 @@ def _t(
         "path_params": path_params,
         "query_params": query_params,
         "body_params": body_params,
-        "tool": types.Tool(name=name, description=description, inputSchema=schema),
+        "timeout_s": timeout_s,
+        "tool": types.Tool(
+            name=name, description=description, inputSchema=schema, annotations=annotations,
+        ),
     }
 
 
@@ -376,6 +381,42 @@ _TOOLS: list[dict[str, Any]] = [
         schema={"type": "object", "properties": {}, "additionalProperties": False},
     ),
     _t(
+        "paperdaily_update_profile",
+        "PUT",
+        "/api/v1/me/profile",
+        description=(
+            "Sync the user's research interests to PaperDaily, just like saving "
+            "on the website. Requires write:profile. Replaces the existing "
+            "natural-language profile, topic interests and method keywords; "
+            "preserves followed authors, saved papers and feedback. Call only "
+            "when the user asks to sync/update their interests (that request is "
+            "authorization); use their stated research description, and ask for "
+            "it if missing instead of inventing interests. Returns the saved "
+            "profile plus report_rebuild: rebuilding is queued/in progress, "
+            "not a completed report; throttled/unavailable still means the "
+            "profile was saved. No email is sent. May take up to 180 seconds. "
+            "No automatic retries: after a timeout, use paperdaily_get_profile "
+            "to check whether the narrative was saved before resubmitting."
+        ),
+        body_params=("natural_language",),
+        schema={
+            "type": "object",
+            "required": ["natural_language"],
+            "properties": {
+                "natural_language": {
+                    "type": "string", "minLength": 1, "maxLength": 8000,
+                    "description": "The user's own description of their research interests.",
+                },
+            },
+            "additionalProperties": False,
+        },
+        timeout_s=180.0,
+        annotations=types.ToolAnnotations(
+            readOnlyHint=False, destructiveHint=True, idempotentHint=False,
+            openWorldHint=True,
+        ),
+    ),
+    _t(
         "paperdaily_follow_topics",
         "POST",
         "/api/v1/me/topics",
@@ -654,9 +695,17 @@ async def _dispatch(name: str, arguments: dict[str, Any]) -> list[types.TextCont
     method = entry["method"]
     async with _client() as cli:
         try:
-            r = await cli.request(method, path, params=query, json=body)
+            request_options: dict[str, Any] = {}
+            if entry["timeout_s"] is not None:
+                request_options["timeout"] = entry["timeout_s"]
+            r = await cli.request(method, path, params=query, json=body, **request_options)
         except httpx.HTTPError as e:
-            return [types.TextContent(type="text", text=f"transport error: {e}")]
+            recovery = (
+                "\nSave outcome is unknown. Use paperdaily_get_profile to check "
+                "the saved narrative before resubmitting; do not automatically retry."
+                if name == "paperdaily_update_profile" else ""
+            )
+            return [types.TextContent(type="text", text=f"transport error: {e}{recovery}")]
 
     body_text: str
     if r.headers.get("content-type", "").startswith("application/json"):

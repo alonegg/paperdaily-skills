@@ -1,7 +1,7 @@
 # paperdaily MCP server — quickstart
 
 `paperdaily-mcp` is a stdio Model Context Protocol server that exposes
-the paperdaily v1 REST API as **28 agent tools**. Drop it into Claude
+the paperdaily v1 REST API as **29 agent tools**. Drop it into Claude
 Desktop / Claude Code / Cursor / any MCP-compatible runtime and the
 agent can auto-discover and call `paperdaily_get_digest_today`,
 `paperdaily_get_paper`, `paperdaily_ask`, etc. directly.
@@ -68,7 +68,7 @@ add a `paperdaily` entry under `mcpServers`:
 > self-hosted deployment can point it at its own origin instead.
 
 Restart Claude Desktop. In a new conversation, open the tools list —
-you should see `paperdaily` with 28 tools.
+you should see `paperdaily` with 29 tools.
 
 ## Configure Claude Code
 
@@ -83,7 +83,7 @@ Verify:
 
 ```bash
 claude mcp list
-# paperdaily — stdio — 28 tools
+# paperdaily — stdio — 29 tools
 ```
 
 ## Sanity check from the terminal
@@ -100,7 +100,7 @@ You should see the top OpenAlex fields with paper counts in the
 millions. If that works but the agent sees no tools, the problem is on
 the MCP config side (env not reaching the process, binary not on PATH).
 
-## The 28 tools
+## The 29 tools
 
 Mirror the v1 REST surface 1:1. Names follow the
 `paperdaily_<verb>_<noun>` convention.
@@ -125,6 +125,7 @@ Mirror the v1 REST surface 1:1. Names follow the
 | `paperdaily_list_subfields` | read:paper | `GET /taxonomy/subfields` |
 | `paperdaily_list_topics` | read:paper | `GET /taxonomy/topics` |
 | `paperdaily_get_profile` | write:profile | `GET /me/profile` |
+| `paperdaily_update_profile` | write:profile | `PUT /me/profile` |
 | `paperdaily_follow_topics` | write:profile | `POST /me/topics` |
 | `paperdaily_unfollow_topic` | write:profile | `DELETE /me/topics/{id}` |
 | `paperdaily_follow_authors` | write:profile | `POST /me/authors` |
@@ -162,6 +163,16 @@ Quotas are enforced server-side per (key tier, scope) — the same table
 as the REST surface. 429 responses carry `Retry-After` and
 `X-RateLimit-*` headers. Full rate-limit and error-code reference:
 <https://www.paperdaily.org/docs/api/quickstart.html>.
+
+## Sync research interests
+
+With `write:profile` on your key, tell the agent: “把我的研究兴趣同步到 PaperDaily：我关注因果推断在劳动经济学中的应用，特别是工具变量和断点回归。” The agent calls `paperdaily_update_profile` with your description as `natural_language`; it does not need to select taxonomy IDs first.
+
+The request authorizes this save. If the agent already has your stated interests, “把我的研究兴趣同步到 PaperDaily” is enough; otherwise it should ask for the description rather than invent one. Saving **replaces** your narrative, topic interests and method keywords, preserving authors, saves and feedback. Nonblank text, at most 8000 characters.
+
+The response returns the saved profile and `report_rebuild`: `rebuilding` is queued/in progress (including an existing job), not complete; `throttled` and `unavailable` still mean the profile was saved. Rebuild uses the website's user lock and five-minute throttle, and sends no email. This tool waits up to 180 seconds for extraction. It never automatically retries a write; if transport fails, `paperdaily_get_profile` should first check whether the narrative was saved. A changed profile does not prove today's report has already regenerated.
+
+The new tool requires an MCP client package containing `paperdaily_update_profile` and a server version exposing `PUT /api/v1/me/profile`. Restart the MCP connection after upgrading; old clients continue to offer the original tools.
 
 ## Troubleshooting
 

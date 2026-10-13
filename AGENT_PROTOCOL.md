@@ -21,6 +21,14 @@
 
 - agent 不得代签/代管 key（需要 cookie session）；key 缺 scope 时**静默降级只读并提示**，不报错、不绕行。
 
+### 1.1 自然语言兴趣同步
+
+- 端点：`PUT /api/v1/me/profile`，scope `write:profile`，请求 `{natural_language}`（非空白，最多 8000 字符，额外字段拒绝）。身份只取 key owner。
+- MCP：`paperdaily_update_profile(natural_language)`。用户明确要求“把我的研究兴趣同步到 PaperDaily”即授权此项保存；已有用户自述时直接使用，没有自述时先索取，不从阅读行为自行编造兴趣。
+- 保存：复用网页同一抽取/事务，替换自然语言原文、主题兴趣、方法关键词，保留作者关注、收藏、反馈；审计与画像写入同事务。
+- 回执：`user_id/natural_language/topic_interests/method_keywords` 为已保存结果，`report_rebuild` 区分 `rebuilding`（已调度或已有任务）、`throttled`（含可用的 `retry_after_seconds`）、`unavailable`。后两者仍是画像保存成功；不得把重建受限说成画像同步失败。沿用网页锁及 5 分钟节流，不发邮件。
+- 此写工具 HTTP 等待上限 180 秒，**传输失败不按普通读取请求自动重试**。先用 `GET /me/profile` / `paperdaily_get_profile` 核对自然语言原文；结果不确定时如实报告，避免重复抽取和调度。`GET /digest/today` 可能仍是先前日报，不能据此断言本次重建完成。
+
 ## 2. 检索协议（分层；agent 不走 /ask）——0.8.0 定稿
 
 **规范**：agent 检索一律走结构化分层端点；`/ask` 仅当需要**服务端合成**（如领域综述 overview）。理由：agent 自身是 LLM，/ask 的 NL 翻译 + 散文合成两段对 agent 是浪费（慢/贵/有损/多幻觉面）。
@@ -31,7 +39,13 @@
 | L1/L2 | `GET /papers/search?q=&mode=auto&limit=&subfield_id=&field_id=&year_from=&year_to=` | 瀑布（`mode=auto`）：① q 形如标识符 → 内部 resolve 单条命中 `match_layer='id'`；② 标题词法（`paper_search` 投影）`match_layer='title'`；③ 语义向量兜底 `match_layer='semantic'`。响应 `{items:[{id,title,publication_date,match_layer,score,…}], layer_used, took_ms}`；`mode=title\|semantic` 可钉住单层；`limit ≤50`；**q= 无需 facet 过滤**（区别于 legacy `/papers?q=`） | `read:paper`，0 分，限流 |
 | L2' | `GET /papers/{id}/similar` | SPECTER2 相似（BGE 兜底） | `read:paper`，0 分 |
 | L3 | `GET /papers?topic_ids=…` / `/authors/*` / `/taxonomy/*` | 图谱/分面浏览 | `read:paper`，0 分 |
+| L1b | `POST /papers/match` | 一张结构化参考文献表（≤100 条）→ 库内论文；状态 matched / ambiguous / cited_stub_only / not_in_corpus / deferred / rejected_input（**未收录 ≠ 不存在**）。参考文献原文由 agent 自己解析成结构化条目再传 | `read:paper`，额度桶 `read:paper#match`，按条计 |
+| L2'' | `POST /papers/related` | 引文推荐：段落 / 全文（服务端确定性切段）→ 每段与全文的参考文献候选，带模板化理由与 `coverage`；可带已匹配的参考文献（`seed_ids`）提高精度。只说「库内可找到的候选」 | `read:paper`，额度桶 `read:paper#related`，按次计 |
+| L3' | `POST /papers/citation-neighborhood` | 一组论文（≤100）的共被引与共同源头；stub 单列 | `read:paper`，额度桶 `read:paper#citation_neighborhood`，每 25 篇 1 单位 |
+| L3'' | `GET /methods*` / `POST /journals/lookup` | 方法族统计与 AI 综述（`kind: ai_synthesis`，数字不是统计数）；期刊按 ISSN / 刊名批量查评级（≤200 条，每 key 每天 200 条） | `read:paper`；lookup 额度桶 `read:paper#journals_lookup` 按条计 |
 | L4 | `POST /ask` | 服务端 LLM 合成（散文 + cited_paper_ids） | `synth:ask`，10 分 |
+
+**文献对照原语（L1b / L2'' / L3' / L3''，1.0.x 起）**：这些端点只收 POST，请求里的标题、段落、摘要**不落库、不写日志、不做缓存键**；重请求共用全局并发闸，忙时返回 503 + `Retry-After`，按头部退避即可。对外形状见 `docs/api/biblio-*.md`。
 
 **精准指向用 resolve（单篇或空），模糊匹配用 search（层标注排序列表）**。search 未命中时逐层降级，agent 不应自行对 /papers 全列表做客户端过滤模拟搜索。legacy `/papers?q=` 仍在（0.8.0 起投影就绪时同样放开强制 facet 过滤），但 agent 一律用 `/papers/search`。
 

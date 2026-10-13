@@ -13,21 +13,21 @@ the client.
 
 ## Install
 
-From PyPI (recommended):
+From the public skills repo (recommended for MCP 0.1.1 and profile sync):
 
 ```bash
-uv tool install paperdaily-mcp
-# or
-pipx install paperdaily-mcp
-```
-
-From the public skills repo:
-
-```bash
-uv tool install \
+uv tool install --upgrade \
     --from 'git+https://github.com/alonegg/paperdaily-skills#subdirectory=mcp' \
     paperdaily-mcp
 ```
+
+Then restart your MCP connection. `paperdaily_update_profile` should appear
+among the 29 tools.
+
+PyPI still carries 0.1.0 as checked on 2026-10-13; that version does not
+include `paperdaily_update_profile`. Use the Git installation above for
+natural-language profile sync. The older package remains installable with
+`uv tool install paperdaily-mcp` or `pipx install paperdaily-mcp`.
 
 Confirm the binary is reachable:
 

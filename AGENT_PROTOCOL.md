@@ -1,7 +1,7 @@
 # Paperdaily Agent 协议（Protocol v1）
 
 > **Status**: ①②④⑦章随 0.8.0 定稿（2026-07-26）；③⑤章随 A1 定稿（2026-07-26，0.8.x 第二批，端点上线前字段名以 OpenAPI 为准）；④⑦章随 0.8.5 修订（2026-07-27 回传面安全评审：evidence 条数上限 + 共享改管理员前置审核）；③章随 0.8.6 补 `GET /me/saves`（收藏库读回）；⑥⑧持续演进。
-> **定位**: 本地 agent（用户侧 Claude + skills）↔ paperdaily 服务端的**对外契约单一呈现层**。本文是契约的权威呈现；`quickstart-zh.md` 是示例层，与本文冲突时以本文为准。服务端行为以运行版本的 OpenAPI 为准。
+> **定位**: 本地 agent（用户侧客户端与 skills）↔ paperdaily 服务端的**对外契约单一呈现层**。本文是契约的权威呈现；`quickstart-zh.md` 是示例层，与本文冲突时以本文为准。服务端行为以运行版本的 OpenAPI 为准。
 > **心智模型**: 车间与总控室——agent（车间，多实例）做认知与授权全文；服务端（总控室，单实例）做记忆、图谱、路由。分析真相在服务端，原文真相在本地。
 
 ## 1. 身份与授权
@@ -19,7 +19,7 @@
 | `read:reading`（0.8.0 新增） | 深读 session 回读 / 任务收件箱 | deep-research 类 |
 | `write:reading`（0.8.0 新增） | 深读产物上传 / 任务完结 | deep-research 类，**用户显式勾选** |
 
-- agent 不得代签/代管 key（需要 cookie session）；key 缺 scope 时**静默降级只读并提示**，不报错、不绕行。
+- agent 不得代签/代管 key（需要 cookie session）；key 缺 scope 时明确报告该操作未完成；可以继续独立的已授权只读任务，不绕行、不把权限错误当空结果。
 
 ### 1.1 自然语言兴趣同步
 
@@ -45,9 +45,15 @@
 | L3'' | `GET /methods*` / `POST /journals/lookup` | 方法族统计与 AI 综述（`kind: ai_synthesis`，数字不是统计数）；期刊按 ISSN / 刊名批量查评级（≤200 条，每 key 每天 200 条） | `read:paper`；lookup 额度桶 `read:paper#journals_lookup` 按条计 |
 | L4 | `POST /ask` | 服务端 LLM 合成（散文 + cited_paper_ids） | `synth:ask`，10 分 |
 
-**文献对照原语（L1b / L2'' / L3' / L3''，1.0.x 起）**：这些端点只收 POST，请求里的标题、段落、摘要**不落库、不写日志、不做缓存键**；重请求共用全局并发闸，忙时返回 503 + `Retry-After`，按头部退避即可。对外形状见 `docs/api/biblio-*.md`。
+**文献对照原语（L1b / L2'' / L3' / L3''，1.0.x 起）**：这些端点只收 POST，请求里的标题、段落、摘要**不落库、不写日志、不做缓存键**；重请求共用全局并发闸，忙时返回 503 + `Retry-After`，按头部退避即可。对外形状见 `运行版本的 OpenAPI`。
 
 **精准指向用 resolve（单篇或空），模糊匹配用 search（层标注排序列表）**。search 未命中时逐层降级，agent 不应自行对 /papers 全列表做客户端过滤模拟搜索。legacy `/papers?q=` 仍在（0.8.0 起投影就绪时同样放开强制 facet 过滤），但 agent 一律用 `/papers/search`。
+
+### 检索结果的解释与作者展开
+
+- `POST /papers/batch` 不展开 `authors_full`；其 `null` 表示未请求/未支持展开，不能据此判为无作者。需要名单时读单篇 `GET /papers/{id}?include=authors_full` 或 `GET /papers/{id}/authors`。
+- 单篇名单优先读 AUTHORED 边，无边时复用来源作者名旁表。旁表名单没有图身份，返回 `id=null, linked=false, orcid=null`，不得拼接 Author 页链接或伪造 A-id；两种来源均无名单时仍报告缺失。老客户端应兼容 nullable id。
+- semantic 搜索 `why` 中的 `dominant cluster` 只表示召回候选的来源 Topic 众数；它不能证明结果相关或偏题。`score` 混合检索与图谱信号，不是相关性概率，也没有通用的 0.60 及格线。相关性应根据标题、摘要及问题逐篇判断。
 
 ## 3. 上下文协议（context bundle）——A1 定稿
 
@@ -75,8 +81,21 @@
   > **v0.8.5 破坏性收紧（唯一一处）**：`claims[].evidence` 此前无条数上限。这是 payload 里唯一无界的列表，配合当时只看 `Content-Length` 的请求体门（chunked 请求可绕过，且服务端在鉴权前就把 body 读进内存）构成鉴权前的内存耗尽面。超过 20 条现在 422。真实深读的页码锚点式证据远低于此，实践中不会碰到；碰到了就是该拆成多条 claim。
 - **共享不是上传的一部分**：上传只入库，`visibility` 恒为 `private`。对外可见是**用户**在 web 端的独立动作，且从 v0.8.5 起需**管理员审核放行**（见 §7.5）。agent 不得代替用户申请公开。
 - **回读**：`GET /api/v1/me/reading-sessions`、`GET /api/v1/me/reading-sessions/{id}`（`read:reading`）；web 回看 `https://www.paperdaily.org/workbench?tab=reading&s=<id>`。
-- **质量语义**：服务端不做真伪裁决；不过质量门（notes 字段完整度、claims evidence 非空率）的上传**可存但标 unverified、不计积分**。参考客户端 gate 见 `skills/paperdaily-deep-research/scripts/upload_session.py`（evidence 非空率 ≥80% 等）。
+- **质量语义**：服务端不做真伪裁决，也不颁发语义 verified 标记。schema 合法的上传可存；积分门要求至少一份笔记、一条 claim，且每条非 gap claim 都有证据。deep 0.7.0 的本地 `upload_session.py` 额外校验选入覆盖、来源哈希、实际阅读记录和 claim 锚点；通过只说明结构一致，不证明蕴含或研究真实性。
 - 上传是**用户显式同意后的独立动作**——skill 不得静默上传（见 SKILL_SPEC 同意点条款）。
+
+### 4.1 不可变修订（新增能力，先探测部署支持）
+
+- `POST /me/reading-sessions/{session_id}/revisions`：同首传 payload、
+  `write:reading`，父 session 必须属于 key owner。新版本为独立的 private
+  session，原版本与其共享状态保留。
+- 修订按服务端规范化内容哈希与根 session 幂等；provenance 记录
+  `revision_of / revision_root / artifact_fingerprint / source_worklist_fingerprint`。
+  传输失败可重试同一修订；不会重复发芽或获得上传/全文奖励，session 数上限不变。
+- 旧服务器返回 404/405：报告修订未保存，保留本地文件，不回落首传。
+  首传的 `deduplicated=true` 只意味着找到既有记录，绝不证明修改已保存；
+  客户端须回读比较内容（需 read:reading）或声明未核验。
+- 本地上传收据绑定服务 origin、session id 与 artifact hash，不能跨服务器复用。
 
 ## 5. 任务协议（agent 收件箱）——A1 定稿
 
@@ -87,7 +106,7 @@
 - **完结回链**：`POST /me/reading-sessions` payload 可带可选 `task_id`，响应新增 `task_linked: bool`。`true` = 任务标 done 并回链 `result_session_id`；`false` = task_id 不存在/不属于你/已完结——**session 本身照常入库**，回链失败不连坐上传。
 - **幂等**：入队侧由服务端保证——同 kind + **同 payload** 的 open 态任务不重复入队（幂等键 = md5(payload)，口径顺序敏感：`deep_read` 的 paper_ids 顺序即语义，首篇=种子，同组乱序视为不同任务；`answer_question` 同理，键 = question_id + 同序 seed_paper_ids）；agent 对同一任务不重复加工（列表里见过、claim 过或已回链的不再做）。
 - kind：`deep_read`（A1，`payload:{paper_ids[], note?}`——paper_ids 作深读种子，skill 侧第一篇当 `--paper` 种子、其余并入 worklist）、`answer_question`（**A2 起启用**，`payload:{question_id, seed_paper_ids[]}`——`question_id` 指向用户的一条 reading question，其问题文本即研究目标（问题原文经 `GET /api/v1/me/questions/{question_id}`（`read:reading`）获取，见上方端点行）；`seed_paper_ids` 首篇作种子、其余并入 worklist；任务可由**服务端问题值班自动生成**（question_leads 命中）或**用户在 web 从线索卡下单**）。
-- 参考客户端：`skills/paperdaily-deep-research/scripts/pd_inbox.sh`（列取/领取，缺 scope 软降级）+ `upload_session.py --task-id`（完结回链）。
+- 参考客户端：`skills/paperdaily-deep-research/scripts/pd_inbox.sh`（列取/领取，缺 scope 明确失败）+ `upload_session.py --task-id`（完结回链）。
 
 ## 6. 行为规范
 

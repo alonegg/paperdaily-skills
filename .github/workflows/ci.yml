@@ -60,3 +60,16 @@ jobs:
             | grep -vE 'pd_live_(x+|X+|TESTKEY|your_key_here)$' && {
                 echo "::error::a pd_live_ literal that is not an obvious placeholder"; rc=1; } || true
           exit $rc
+
+  behavior:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ['3.10', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - name: Offline behavior and routing regression
+        run: uv run --no-project --python '${{ matrix.python }}' --with pytest pytest tests/ -q
+      - name: Verify release manifest
+        run: python3 -c "from pathlib import Path; from install import verify; verify(Path('.'))"

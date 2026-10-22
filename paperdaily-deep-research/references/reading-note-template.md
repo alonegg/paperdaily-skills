@@ -12,9 +12,8 @@
    （非 `[A-Za-z0-9._-]` 字符替换成 `_`，即 `arxiv:2409.10897` →
    `pdfs/arxiv_2409.10897.pdf`）；笔记文件名同用安全化形式
    `notes/arxiv_2409.10897.md`，笔记正文的 **paper_id** 字段写原始 id。
-2. 用户自带 PDF、没有 worklist 时的兜底：有 arXiv ID → `arxiv:<裸号>`；
-   否则有 DOI → `/` 替换成 `_`（如 `10.1145_3600006`）；否则
-   `<第一作者姓，小写><年份>_<标题前3个实词 slug>`。
+2. 用户自带材料先登记到 `external_sources.jsonl`，优先保留原始 DOI/arXiv ID；
+   无稳定标识时分配本地 ID，并记录标题与登记原因。ID 不做文件名安全化；仅文件名替换字符。
 
 一旦为某篇论文定下 id，全程复用，不要中途改写法。
 
@@ -64,10 +63,10 @@
 | 标记 | 什么时候用 | 后果 |
 |---|---|---|
 | `abstract-only` | 阶段 2 没取到全文，只有摘要 | 只填摘要能确证的字段；阶段 4 回传时 depth 记为 abstract-only |
-| `anchor-degraded` | PDF 读得到但拿不到可靠页码（加密/扫描件/工具报错） | 全篇改用 `(§N.M)` 章节锚 |
+| `anchor-degraded` | 原件无法可靠定位 | 保留局部笔记待复核；上传前提供可核对的章节全文载体或实际摘要证据 |
 | `PDF 页码基准: 物理 p.1 = 印刷 p.<N>` | 印刷页码与物理页码不一致 | 声明一次，全篇按物理页锚定 |
 
-降级本身不丢人，**不声明降级才是问题**——阶段 4 的 depth 推断和 claims 的证据强度都靠这些标记，冒充全文级会让整条证据链失真。
+降级本身不丢人，**不声明降级才是问题**——阶段 4 以 reading_manifest 的实际阅读记录判 depth，并校验笔记的一致性，冒充全文级会让整条证据链失真。
 
 ---
 
@@ -83,6 +82,7 @@
 - **DOI**: <DOI 或 "无">
 - **代码仓库**: <URL 或 "未开源">
 - **paper_id**: `<paper_id>`
+- **depth**: <fulltext / abstract-only；来自实际阅读记录>
 - **PDF 来源**: <本地路径或获取渠道，参见 fulltext-sources.md>
 - **全文载体**: <binary-pdf / html-fulltext / parsed-fulltext>
 - **版本**: <vor 正式发表版 / accepted 录用稿 / wp 工作论文 / preprint / alternate；

@@ -49,6 +49,12 @@
 
 **精准指向用 resolve（单篇或空），模糊匹配用 search（层标注排序列表）**。search 未命中时逐层降级，agent 不应自行对 /papers 全列表做客户端过滤模拟搜索。legacy `/papers?q=` 仍在（0.8.0 起投影就绪时同样放开强制 facet 过滤），但 agent 一律用 `/papers/search`。
 
+### 检索结果的解释与作者展开
+
+- `POST /papers/batch` 不展开 `authors_full`；其 `null` 表示未请求/未支持展开，不能据此判为无作者。需要名单时读单篇 `GET /papers/{id}?include=authors_full` 或 `GET /papers/{id}/authors`。
+- 单篇名单优先读 AUTHORED 边，无边时复用来源作者名旁表。旁表名单没有图身份，返回 `id=null, linked=false, orcid=null`，不得拼接 Author 页链接或伪造 A-id；两种来源均无名单时仍报告缺失。老客户端应兼容 nullable id。
+- semantic 搜索 `why` 中的 `dominant cluster` 只表示召回候选的来源 Topic 众数；它不能证明结果相关或偏题。`score` 混合检索与图谱信号，不是相关性概率，也没有通用的 0.60 及格线。相关性应根据标题、摘要及问题逐篇判断。
+
 ## 3. 上下文协议（context bundle）——A1 定稿
 
 - `GET /papers/{id}/context-bundle`（`read:paper`，纯读 0 分）：服务端预计算上下文打包，单往返替代 5-6 次零散拉取。响应五段（段的语义定稿如下，具体字段名以 OpenAPI 为准）：
@@ -77,6 +83,19 @@
 - **回读**：`GET /api/v1/me/reading-sessions`、`GET /api/v1/me/reading-sessions/{id}`（`read:reading`）；web 回看 `https://www.paperdaily.org/workbench?tab=reading&s=<id>`。
 - **质量语义**：服务端不做真伪裁决；不过质量门（notes 字段完整度、claims evidence 非空率）的上传**可存但标 unverified、不计积分**。参考客户端 gate 见 `skills/paperdaily-deep-research/scripts/upload_session.py`（evidence 非空率 ≥80% 等）。
 - 上传是**用户显式同意后的独立动作**——skill 不得静默上传（见 SKILL_SPEC 同意点条款）。
+
+### 4.1 不可变修订（新增能力，先探测部署支持）
+
+- `POST /me/reading-sessions/{session_id}/revisions`：同首传 payload、
+  `write:reading`，父 session 必须属于 key owner。新版本为独立的 private
+  session，原版本与其共享状态保留。
+- 修订按服务端规范化内容哈希与根 session 幂等；provenance 记录
+  `revision_of / revision_root / artifact_fingerprint / source_worklist_fingerprint`。
+  传输失败可重试同一修订；不会重复发芽或获得上传/全文奖励，session 数上限不变。
+- 旧服务器返回 404/405：报告修订未保存，保留本地文件，不回落首传。
+  首传的 `deduplicated=true` 只意味着找到既有记录，绝不证明修改已保存；
+  客户端须回读比较内容（需 read:reading）或声明未核验。
+- 本地上传收据绑定服务 origin、session id 与 artifact hash，不能跨服务器复用。
 
 ## 5. 任务协议（agent 收件箱）——A1 定稿
 

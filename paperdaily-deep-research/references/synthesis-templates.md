@@ -28,7 +28,7 @@
 ### 3. 流派/分类法 `taxonomy.md`
 
 ⚠️ **0.6.0 起这一件不是从头归纳的**：分组在阶段 1b 就已经做完并落在
-`taxonomy.json` 里，且被 1d 机械校验过、被 3a 的子 agent 带着各节的
+`taxonomy.json` 里，且被 1d 机械校验过、被阶段 3 的阅读者带着各节的
 `key_questions` 实际读过一遍。这里要做的是**把它写开**——给每个节点补上「组内
 共享假设」和「与其他节点的分歧」，论文清单按 `routing.selected.jsonl` 重算
 （不是 `routing.jsonl`，那是收敛前的）。

@@ -1,966 +1,126 @@
 ---
 name: paperdaily-deep-research
 description: >-
-  Deep, citation-grounded literature research on the user's own paperdaily
-  corpus — the skill that actually READS the papers instead of listing them.
-  Pulls a candidate pool from paperdaily (taxonomy facets, layered search,
-  seed-paper similarity), downloads the full-text PDFs locally through an
-  open-access waterfall, fans out an agent team for page-anchored deep reads,
-  synthesizes a method comparison plus timeline plus taxonomy plus a four-state
-  evidence ledger, and can upload the analysis back to the paperdaily workbench.
-  Use it whenever the user wants a research direction 深度调研 / 精读 /
-  做成文献综述, hands over a seed paper ("深读这篇论文", "--paper <id>"), pastes a
-  deep-read command copied from the paperdaily web UI, asks what their agent
-  收件箱 has queued, or wants a review where every claim carries a paper id and
-  page number. For a quick lookup instead — "今天有什么新论文", a one-shot field
-  digest, an author's recent work — use the lighter paperdaily skill instead.
-  This one is the right pick only
-  when depth is the point — it downloads PDFs and spawns reading sub-agents.
-  Credentials come from ~/.paperdaily-cli/env.
+  Conduct citation-grounded literature research with PaperDaily: discover a
+  candidate pool, organize and select papers, obtain authorized full texts,
+  read with source anchors, synthesize evidence and optionally upload derived
+  analysis. Use for deep reading, literature reviews, seed-paper research and
+  the research task inbox. Supports a single agent or explicitly authorized
+  delegation; no specific model or client is required.
 ---
 
-# paperdaily-deep-research
+# PaperDaily 深度研究
 
-> **声明块（SKILL_SPEC §1）**
-> - **skill_ver**: `0.6.1`
-> - **协议版本**: AGENT_PROTOCOL v1（`docs/api/AGENT_PROTOCOL.md`；检索走其 §2
->   分层端点，收件箱走其 §5 任务协议）
-> - **所需 scopes**: `read:digest, read:paper, synth:ask`；阶段 0（可选收件箱）
->   另需 `read:reading`（缺失时跳过该阶段不报错）；领取任务（claim）与阶段 4
->   （可选回传）另需 `write:reading`（用户显式勾选，缺失时只读降级不报错）
+- **skill_ver**: `0.7.0`
+- **协议**: AGENT_PROTOCOL v1
+- **基本 scope**: `read:paper`；可选 inbox/成果回读 `read:reading`，领取/上传/修订
+  `write:reading`，显式服务端综合 `synth:ask`。
+- **运行条件**: Python ≥3.10；兼容 `.sh` 入口另需 Bash；全文工具的可选依赖见来源手册。
+- 所有 `scripts/…` 相对本 Skill 所在目录，不硬编码客户端安装路径。
 
-从「一个研究领域 / 一篇种子论文」到「一份可溯源的深度文献综述」的流水线：
-主干是检索 → 建结构 → 收敛 → 取全文 → 深读综合，两端各挂一个可选阶段
-（收件箱、回传）。阶段间用落盘工件衔接（phase gate），可以从任意阶段进入——
-用户手头已有清单就直接进阶段 2，已有 PDF 就直接进阶段 3。
+用户要求的是带可核查证据的研究成果。按下面的落盘工件推进，缺项不能靠措辞盖成完成。
+沿用会话的模型、权限与用户已给的授权；只在用户或适用指令允许时派子 Agent。
 
-```
-阶段 0   收件箱（可选） pd_inbox.sh         → 用户在 web 排的任务 → 种子论文
-阶段 1a  检索          pd_worklist.sh      → worklist.jsonl（+ /ask 背景综述）
-阶段 1b  归纳章节      你（LLM）           → taxonomy.json
-阶段 1c  反向路由      你（LLM，10 篇一批） → routing.jsonl
-阶段 1d  确定性校验    pd_route_check.py   → 覆盖率/孤儿节点 + 重写 overview.md
-阶段 1.5 按节收敛      与用户一起挑         → worklist.selected.jsonl
-                                             + routing.selected.jsonl
-阶段 2   全文获取      fetch_fulltext.py   → pdfs/*.pdf + fetch_report.jsonl
-                     pd_browser_fetch.py    （--triage 先分诊；穷尽则交回 needs_web_search）
-阶段 3a  逐篇精读      agent team（按节派工）→ notes/<paper_id>.md
-阶段 3b  按节综合      opus / 主会话        → synthesis/* + report.md
-阶段 4   回传（可选）  upload_session.py   → paperdaily 工作台 reading session
-                                             （--task-id 完结阶段 0 领取的任务）
-```
+## 0. 任务与预检
 
-**0.6.0 的改动集中在阶段 1**：原来的阶段 1 直接交出一个平的候选池，结构决策被
-推到阶段 3b——而那正是上下文里塞满了笔记、最不适合做结构决策的时刻。现在先把
-池子归纳成章节（1b）、把每篇论文反向路由进去（1c）、机械校验一遍（1d），后面
-的收敛、派工、综合全部**按节**走同一个结构。形状与提示词见
-[references/taxonomy-routing.md](references/taxonomy-routing.md)。
+运行 `python3 scripts/pd.py doctor --json`。配置在环境或 `~/.paperdaily-cli/env`，
+不执行配置文件、不打印 key。明确研究问题、时间范围、研究对象、报告用途；有现成材料
+就从对应阶段继续。文件落到用户指定目录或 `pd-research/<slug>/`。
 
-统一工作目录约定（阶段 1a 默认创建，1b–1d 往里加三个文件）：
+可选任务入口：`scripts/pd_inbox.sh --json`；已有领取授权时使用 `--claim ID`。
+缺 `read:reading`/`write:reading` 返回明确错误，不把权限不足显示为收件箱为空。
+可以继续其他已授权的本地研究，但要报告该步骤未完成。
 
-```
-pd-research/<slug>/
-├── worklist.jsonl          # 候选池（id/title/doi/arxiv_id/oa_url/pdf_url）
-├── worklist.extractions.json # 阶段 1b 的输入：POST /papers/batch 的抽取（可重取）
-├── taxonomy.json           # 阶段 1b 的章节表（与服务端 llm/survey 同形）
-├── routing.jsonl           # 阶段 1c 的路由表：每行 {paper_id, nodes:[≤3]}
-├── worklist.selected.jsonl # 阶段 1.5 选中真正深读的那批（阶段 2 的输入）
-├── routing.selected.jsonl  # 阶段 1.5 收敛后的路由（阶段 3a 按它派工）
-├── worklist.twins.jsonl    # 折叠掉的孪生行审计（kept/dropped/title）
-├── worklist.meta.json      # 检索目标 provenance 侧车（阶段 4 读取）
-├── decisions.md            # 你替用户做过的判断（规模/选谁/为什么），随时可查
-├── overview.md             # 阶段 1d 重写成「taxonomy + 路由表」；文末附 1a 的 /ask 综述
-├── pdfs/                   # 阶段 2 下载的全文（永留本地，绝不上传）
-├── fetch_report.jsonl      # 每篇的获取账本（命中层/失败原因/carrier/version；主键字段名是 `id`，不是 `paper_id`）
-├── triage.jsonl            # `--triage` 的可达性分诊（阶段 1.5 选语料用）
-├── needs_web_search.jsonl  # 自动层穷尽后交回给你的检索清单（见阶段 2）
-├── notes/<paper_id>.md     # 阶段 3 逐篇精读笔记
-├── synthesis/              # 四件套 + claims.jsonl
-└── report.md               # 最终深度综述报告
-```
-
-## 开工前先把规模定下来
-
-这条流水线的成本几乎全部线性于**深读几篇**：每篇一次 PDF 下载、一个精读子
-agent、一段进入综合的上下文。所以在跑阶段 1a 之前先用一句话跟用户对齐，不要
-听到「深度调研 X」就直接点火：
-
-> 我打算先从 paperdaily 拉一个 ~40 篇的候选池（约 1-2 分钟），把它归纳成
-> 4-6 个章节并把每篇论文分进去，然后跟你一起按章节挑出 8-15 篇做全文精读，
-> 再出综合报告。精读这段是大头。这个规模合适吗？
-
-一个可用的档位表（**深读篇数**，候选池比它大 3-4 倍即可）：
-
-| 用户想要的 | 深读篇数 | 典型说法 |
-|---|---|---|
-| 摸个底 / 决定值不值得投入 | 5-8 | 「这个方向大概什么情况」 |
-| 正经的方向综述 | 10-15 | 「帮我把这个方向理清楚」 |
-| 就着一篇往外读 | 种子 + 6-10 | 「深读这篇，顺带看看相关的」 |
-| 写论文 related work | 15-25（分批跑） | 「我要写这一章」 |
-
-超过 25 篇就分批：跑完一批出报告，再用同一 `<slug>` 目录追加下一批。一次派
-30+ 个精读子 agent，综合阶段拿到的是一堆读不完的笔记，报告质量反而下降。
-
-## 检索规范（AGENT_PROTOCOL §2 分层）
-
-检索一律走结构化分层端点，`/ask` 只在生成 overview.md 那一次使用：
-
-- **精准指向** → `GET /papers/resolve?id=`：任意标识符（W-id / DOI /
-  arXiv id / URL 形态）→ 单篇或 404，响应带 `resolved_by`；
-- **研究方向（本 skill 的主力入口）** → `GET /papers/search?q=&mode=semantic`
-  ——**钉死语义层，不要用默认的 `mode=auto`**。auto 的瀑布会先跑标题 trgm 层，
-  且**只要凑够 3 条命中就采纳、语义层再也不执行**：实测
-  `mixture of experts routing` 走 auto 是 19.6s / 3 条，钉死 semantic 是
-  5.1s / 20 条。阶段 1a 的池子薄一半以上是这一条造成的，且**不报错**；
-- **确实要按标题定位某一篇** → `mode=title`；分不清用户给的是 id 还是词才用
-  `mode=auto`；
-- **拉池/浏览** → `GET /papers?subfield_id=…` 等 facet 列表与
-  `GET /papers/{id}/similar` 相似扩张；
-- **不要**用 `/ask` 做检索，也不要拉全列表在客户端过滤模拟搜索。
-
-**但「不做检索」≠「不能用」**：`/ask` 是合成端点，本 skill 那一次 overview 调用就是
-它的正当用法（且**必须**用 `load_extractions(paper_ids=[…])` 锚定 worklist，否则它
-自己去检索，拿回的材料跟你的清单对不上）。另外两个工具——`find_papers_by_venue` /
-`lookup_venue`——**REST 至今没开**，venue 维度只能走 `/ask`。
-⚠️ **领域概览已经有 REST 门了**：`GET /taxonomy/overview?field_id=`（或
-`?subfield_id=`）返回预计算的 200-300 词领域概览 + 代表论文 id，纯表读 0 积分，
-可以直接当阶段 1a/1b 的背景材料；**看一眼 `stale_days`** 再决定信不信它「当前活跃」。
-⚠️ 另**别为了拿抽取调 `/ask`**：`POST /papers/batch`（≤100
-id/次）直接返回 `contributions / key_claims / methods / limitations /
-open_questions / tldr_zh`，比 `load_extractions` 更省。完整的 15 工具 → REST 对照表
-在 thin skill 的 `references/semantic-search.md` §9。
-
-**查询要写成一整句**：语义层按 dominant-topic 共识重排，查询太短会把整批结果拽进
-一个错误的簇且看起来完全正常。实测 `chain-of-thought prompting`（2 词）top-1 是
-一篇教育领导力短评（score 0.542，`why` 写着 dominant cluster
-`[Educational Leadership and Practices]`），而
-`chain-of-thought prompting elicits reasoning in large language models`
-把原论文排在第一（0.759）。**判「没打中」主要看 `why` 里的 dominant cluster
-是不是目标领域**（强信号，只能由你判）；top-1 `score` 是弱提示，实测 miss ≤0.542、
-hit 从 0.5936 起，阈值取 **0.56**——两者都在响应里，零额外请求。
-⚠️ 分数**判不出「查询太泛」**：`graph`（1 词）拿 0.6102 且 cluster 正确。
-
-更完整的检索规范（探针定 scope、多改写扇出、seed 双通道、k>38 截断、延迟与配额）
-见 thin skill 的 `references/semantic-search.md`；那份手册的数字与本节同源。
-
-## Pre-flight（每个环境做一次）
-
-需要 `~/.paperdaily-cli/env`：
+## 1. 检索、组织与筛选
 
 ```sh
-mkdir -p ~/.paperdaily-cli && chmod 700 ~/.paperdaily-cli
-cat > ~/.paperdaily-cli/env <<'EOF'
-export PD_BASE="https://www.paperdaily.org/api/v1"
-export PD_KEY="pd_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-EOF
-chmod 600 ~/.paperdaily-cli/env
+scripts/pd_worklist.sh "causal inference with staggered adoption" --limit 40 --out pd-research/example --json
+scripts/pd_worklist.sh --paper arxiv:2201.11903 --paper arxiv:2305.10601 --year-from 2023 --out pd-research/seeds --json
+scripts/pd_worklist.sh 1702 --days 14 --no-extraction --out pd-research/ai --json
+scripts/pd_worklist.sh --paper arxiv:2201.11903 --citation-neighborhood --out pd-research/expanded --json
 ```
 
-Key 在 web UI 签发：登录 → Settings → API keys → Issue key，scopes 至少
-`read:digest,read:paper,synth:ask`；打算用阶段 4 回传的加勾 `write:reading`
-（也可事后补签）。文件缺失时**停下来告诉用户先签 key**，不要试图代签
-（那需要 cookie session）。
+- 方向默认 semantic；已知完整标题用 `--search-mode title`；标识符先 resolve。
+  `--expand` 添加独立检索轴。`--scope auto` 不自动收窄，明确范围用 subfield ID 或 `field:ID`。
+- 查询、similar、引用扩展统一过滤日期与 scope；用户指定的种子留在阅读目标里，即使它早于扩展时间窗。
+- 使用 `/papers/batch` 保存详情和抽取；种子默认读取 context-bundle，`--context` 显式启用。
+  `worklist.jsonl` 保留 canonical、group、DOI/arXiv 与来源 ID，按强身份去重，不按标题硬合并。
+- `worklist.meta.json` 记录请求、时间口径、coverage、失败和追加历史；`--append` 合并，
+  `--replace` 明确替换检索清单，默认不覆盖。重新筛选后须更新 downstream 工件，旧笔记不会自动变正确。
+- 默认没有 `/ask` 开销；需要时才 `--synth`，写入 `synthesis-background.json`，仅作背景。
+- 题录匹配、段落补引、共被引/共同参考、期刊查询均可用 `scripts/pd.py bibliography …`；
+  参数见 `--help` 与 AGENT_PROTOCOL。保留 partial/coverage，不把推荐当成引用支持。
 
-冒烟：
+阅读 [taxonomy-routing.md](references/taxonomy-routing.md)，生成 `taxonomy.json`、
+`routing.jsonl`，运行 `scripts/pd_route_check.py --help` 指示的校验。
+按研究轴、年份、方法与反例筛选 `worklist.selected.jsonl`、`routing.selected.jsonl`，
+记录 `decisions.md`。选择清单必须是已检索池的子集，新增外部材料登记在 `external_sources.jsonl`。
+对筛选后清单重新校验，要求 coverage=1 且无孤儿 analytical 节点。
+
+排名与模型抽取只能辅助组织，相关性由标题、摘要和研究内容确定。字段缺失表示未知，
+不同抽取 schema 的覆盖不适合作为跨年份研究趋势。
+
+## 2. 获取材料
 
 ```sh
-source ~/.paperdaily-cli/env
-curl -sS -o /dev/null -w "%{http_code}\n" "$PD_BASE/openapi.json"   # 期望 200
+python3 scripts/fetch_fulltext.py --worklist pd-research/example/worklist.selected.jsonl --out pd-research/example/pdfs
 ```
 
-## 阶段 0（可选）— 收件箱
+获取规则及续跑见 [fulltext-sources.md](references/fulltext-sources.md)。默认 OA；
+机构直连与用户浏览器只在已确认的授权范围内开启。登录、验证码由用户处理，
+`blocked` 表示验证阻断，`denied` 表示明确拒绝，`partial` 表示片段；三者不能混写。
 
-用户可能已经在 paperdaily web 上给自己的 agent 排了任务（如论文详情页
-「转给我的 agent 深读」）。起手时若 key 带 `read:reading`，先拉一眼收件箱
-（端点契约见 AGENT_PROTOCOL §5）：
+下载账本只证明取得材料，**不证明读过**。完整 PDF、HTML、保留定位的解析全文均可使用；
+读的是另一个版本时记录 version 与目标版本的关系，不能混用页码/样本量/表号。
+没有全文可据实际摘要写 abstract-only 笔记，或显式跳过并说明原因。
+
+## 3. 阅读与证据
+
+阅读 [精读规程](references/deep-read-agent-prompt.md) 和
+[笔记模板](references/reading-note-template.md)。每篇独立笔记使用原始 `paper_id`，
+安全化只用于文件名。一篇论文只有一份笔记。主 Agent 可串行完成；授权并行时按章节分工，
+明确文件归属，单批建议不超过三篇，不覆盖其他 Agent 的文件。
+
+每篇记录到 `reading_manifest.json`：材料相对路径、SHA256、载体、版本、实际阅读深度、
+模型、时间及真实位置锚点；格式见 [证据契约](references/evidence-contract.md)。
+全文标记必须有完整材料与实际完成阅读记录；PDF 记录全部已读物理页。
+只读片段就保留局部笔记，不能标成全文；需要上传时只使用实际读过的摘要并标 abstract-only，
+或显式跳过该篇。不要把局部全文成果错误降称摘要证据。
+
+按 [综合模板](references/synthesis-templates.md) 生成对比、时间线、分类、分歧/缺口和
+`synthesis/claims.jsonl`，最后形成 `report.md`。每条非 gap claim 必须链接到已读来源和
+manifest 中的真实锚点；区分研究发现、作者解释和你的推论。多版本不能计作独立复现。
 
 ```sh
-scripts/pd_inbox.sh              # 表格列出 pending 任务（id/kind/论文数/created_at/note；
-                                 #   answer_question 任务 NOTE 列显示 question:<question_id>）
-scripts/pd_inbox.sh --json       # 机器可读 {items:[…]}——payload 原样透传
-                                 #   （deep_read 读 paper_ids；answer_question 读 seed_paper_ids）
-scripts/pd_inbox.sh --claim <id> # 领取（pending → claimed）
+python3 scripts/pd_evidence.py --dir pd-research/example
+python3 scripts/upload_session.py --dir pd-research/example --dry-run
 ```
 
-规程：
+证据校验检查 ID、覆盖、源文件哈希、阅读记录及 claim-anchor 一致性，**不证明蕴含、
+研究真实性或专家审稿质量**。自己回看关键原文；报告列出检索范围、选入数、全文实读数、
+摘要数、跳过数、失败和局限。访问失败或不足以支持研究问题时明确交付为阶段性结果。
 
-1. 列出任务后**交给用户选**——做哪个、还是不做直接进阶段 1a，都由用户定。
-   key 缺 `read:reading` 时脚本打印补签指引后 exit 0（不是报错），直接跳过
-   本阶段即可；404（服务端版本低于 0.8.1 或未启用收件箱）同样跳过。
-2. 选中的 `deep_read` 任务 → 其 `payload.paper_ids` 作阶段 1a 的 `--paper`
-   种子：单篇直接 `pd_worklist.sh --paper <id>`；多篇取**第一篇**做种子跑
-   完后，把其余 id 逐篇 `GET /papers/{id}` 取 detail 并入 `worklist.jsonl`
-   （`source` 标 `"seed"`，与首行同格式），保证任务点名的每一篇都在清单里。
-3. 选中的 `answer_question` 任务（A2 起，payload =
-   `{question_id, seed_paper_ids[]}`）→ `question_id` 对应的**问题文本就是
-   本轮的研究目标叙述**，先取原文再开工：
+## 4. 可选上传与修订
 
-   ```sh
-   curl -sS -H "Authorization: Bearer $PD_KEY" \
-     "$PD_BASE/me/questions/<question_id>"   # read:reading；响应 .question 即原文
-   ```
-
-   （端点不可用——404/服务端版本低于 0.8.2——时再请用户在 web 工作台「问题」
-   页签给出原文作降级。）`seed_paper_ids` 取**首篇**作 `--paper` 种子，其余 id
-   按上一条同款并入 `worklist.jsonl`（`source` 标 `"seed"`）。后续阶段与
-   deep_read 无异。
-4. **领取（`--claim`）放在用户确认要做之后**，不要一列出来就抢占——
-   claimed 是向服务端声明「这个任务我做了」；409 = 已被领取/已完结，
-   属正常语义不重试，换一个或直接进阶段 1a。
-5. 做完走阶段 4 上传时带 `--task-id <id>`，上传成功即自动完结该任务
-   （响应 `task_linked: true`，session 回链到任务）——两种 kind 都照此
-   完结，`answer_question` 无特殊上传形态。
-
-## 阶段 1a — 检索（候选池）
+用户已明确同意上传时继续，无需重复确认；没有该授权时先说明具体内容再取得同意：
+只上传派生笔记、claims、报告、overview；原文不上传。首传可能把 gap/contested 原文加入
+问题收件箱，并按服务端规则计积分。私有上传不等于公开分享。
 
 ```sh
-scripts/pd_worklist.sh "Artificial Intelligence"           # 默认 --limit 25 --similar 2，折叠后 ~35-50 篇候选池
-scripts/pd_worklist.sh 1702 --year-from 2025 --out ./pd-research/nlp/
-scripts/pd_worklist.sh T10270 --limit 20 --no-synth        # Topic id 直连，跳过综述
-scripts/pd_worklist.sh "graph neural fraud detection"      # 非 taxonomy 词 → /papers/search?mode=semantic
-scripts/pd_worklist.sh "Attention Is All You Need" --search-mode title   # 就是要按标题定位那一篇
-scripts/pd_worklist.sh --paper arxiv:2605.10419            # 单篇种子模式
-scripts/pd_worklist.sh "graph neural fraud detection" --append   # 把第二批并进同一个池子
+python3 scripts/upload_session.py --dir pd-research/example
+python3 scripts/upload_session.py --dir pd-research/example --task-id TASK_ID
+python3 scripts/upload_session.py --dir pd-research/example --revise SESSION_ID
 ```
 
-第一个参数按形状解析：`T\d+`=Topic id、1-2 位数字=Field id、4 位数字=
-Subfield id、其余按名字精确→子串匹配；全部 miss 时自动降级为
-`GET /papers/search?q=&mode=auto` 自由词句检索（0.8.0+ 服务端）。做什么：
-
-1. 主列表：taxonomy 命中走 `GET /papers`（facet 拉池 + `year_from` +
-   `has_extraction=true`）；自由词句走 `GET /papers/search?q=&mode=auto`
-   （stderr 会打出命中层 `layer_used`）；
-2. 每篇 `GET /papers/{id}/similar` 做相邻扩展，合并去重成几十篇推荐池；
-3. 每篇 detail 抽 `doi / arxiv_id / oa_url / resolved_pdf_url` 写
-   `worklist.jsonl`——这些字段就是阶段 2 的全部输入；另写
-   `worklist.meta.json` 侧车记检索目标；
-4. 一次 `POST /ask`（用 `load_extractions` 锚定清单内论文）生成
-   `overview.md`——这是本 skill 唯一一次 `/ask` 调用。**阶段 1d 会把
-   `overview.md` 重写成「taxonomy + 路由表」，把这段 `/ask` 综述挪到文末的
-   「附」里**（它写在章节划分之前、描述的是收敛前的整个池子，作为 provenance
-   保留，但不是最终清单的综述）。
-
-**`--paper <id>` 单篇种子模式**：`GET /papers/resolve?id=` 解析种子
-（W-id / DOI / arXiv id 均可；404 = 未收录，报错并提示改用
-`/papers/search` 找它）→ `GET /papers/{id}/similar?k=<limit>` 扩张成
-worklist，种子在首行（`source:"seed"`）；`--similar` 在此模式下不生效。
-适合「就着这一篇往外读」的场景（如 web 详情页「转给我的 agent 深读」）。
-**注意 off-by-one，且它与折叠叠加**：`--limit` 只管相似扩张那一段，原始池
-上限是 `limit+1`（种子 + limit 篇邻居），折叠又会**再砍掉**其中的孪生行
-（这个语料上常见 20-30%）。想要 N 篇就往多了要，从 `--limit $((N*3/2))`
-起步，然后看 `worklist rows written`——那是折叠后的数。
-
-**但 `--limit` 在这个模式下顶到 38 就没用了**：`/similar` 的 `k` 上限写着 50，
-而 HNSW 的 `ef_search` 默认值把实际返回截在 ~38 条（实测 k=40 回 38、k=50 也回
-38）。**那是索引参数不是语料边界**，别据此判断「这篇论文的相关工作就这么点」。
-
-**更要紧的是单种子的邻域比直觉窄得多**：实测某篇的邻居距离 rank-1 = 0.017、
-rank-30 = 0.027，而**同一篇论文的两条记录**（arXiv 版 vs OpenAlex W 版）之间就有
-0.0399——top-30 覆盖的半径比「同一篇的两个副本」的距离还小。后果是两篇明显相关的
-论文（实测 GPT-3 与 CoT）各自 top-30 邻居**零重叠**。所以单种子 `/similar` 给的
-是「最贴的那一小簇」，不是「相关工作」。要宽就并第二条通道：把种子标题送
-`GET /papers/search?q=<标题>&mode=semantic`（与 `/similar` 实测 20 条只重合 1 条，
-互补而非冗余），或者直接用 thin skill 的
-`scenarios/semantic-search.sh --paper <id> --paper <id2>`——它把两条通道并起来、
-按命中通道数排序，并会剔除种子自身及其孪生行。
-
-## 孪生行折叠（0.4.2）
-
-同一篇论文会以多个 id 进池（图谱里是多个顶点）。脚本在写 `worklist.jsonl`
-前做两趟折叠，并把每一次合并记进 `worklist.twins.jsonl` + 打到 stderr：
-
-| 形态 | 例子 | 谁抓的 |
-|---|---|---|
-| arXiv id ↔ DOI 是 `10.48550/arxiv.X` 的 W 行 | — | 第一趟（硬标识） |
-| arXiv id ↔ doi/arxiv_id 全空但 `oa_url` 是 arxiv.org/pdf 链接的 W 行 | `arxiv:2606.17449` ↔ `W7165219597` | 第一趟（硬标识） |
-| 同一篇挂两个**不同** DOI（会议 DOI / arXiv DOI / Underline DOI） | MIRAGE 挂 `10.48448/…` 与 `10.18653/…` | 第二趟（标题归一） |
-
-**服务端 `paper_group_id` 是补充信号，不是替代品**（0.8.10+ 起 `GET /papers/{id}`
-随详情返回 `paper_group_id` + `is_canonical`，不额外花请求）：
-
-- 它能看到客户端看不到的东西——**标题被改写过的跨版本重复**（工作论文 → 正式发表
-  常改标题），这正是上面两趟折叠抓不到的那一类；
-- 但它覆盖率约 64%，且分组本身仍在修（2026-07-28 实测样本 1/5，客户端同批 5/5）。
-  **所以只能用它来「合并」，绝不能用它来「判定两篇不同」**——两行 group 不同不代表
-  它们不是一篇。
-- 正确用法：把 `paper_group_id` 相同**并入**客户端两趟折叠的结果（取并集），
-  `is_canonical=false` 的那份优先丢弃。**不要因为有了官方字段就删掉客户端逻辑**。
-
-**客户端折叠能保证什么、不能保证什么**（0.4.1 在这里给过一个兑现不了的承诺，别再信那句）：
-
-- **能保证**：上表三类不会再重复占用阅读名额。
-- **不能保证**：标题被改写过的跨版本重复（工作论文 → 正式发表常改标题），以及
-  平台侧 `paper_groups` 才知道的版本链。所以 `worklist rows written`
-  是**已知去重后的下界**，不是「保证互不重复」的断言。
-- **绝不误并**：两行都有 `arxiv_id` 且号码不同时，即使标题一模一样也不合并
-  ——不同的 arXiv 投稿就是不同的工作。
-- 阶段 1.5 挑选时**顺手扫一眼标题**，看到疑似同一篇的再手工去掉一份。
-
-值得这么较真的原因见阶段 3b 的三闸门表：一篇论文被算成两篇会把 `weak` 假升成
-`supported`。
-
-**`--similar` 别低于 2**：这个语料里一篇论文的最近邻常常就是它自己的孪生顶点，
-`--similar 1` 会静默零扩张（脚本 0.4.2 起会为此明确告警）。调大 k **不增加请求
-数**（每篇仍是一次 `/similar` 调用，只是返回列表更长），所以想要更宽的池子直接
-给 3-4。`--similar 0` 是合法的，意思是完全不做相似扩张。
-
-**追加批次**：`--append` 会把已有的 `worklist.jsonl` 并进这一轮再统一折叠，
-用于「跑完一批再补一批」。不加这个参数会**覆盖**原文件。
-
-第一个参数是长尾 Topic 名（不在全库最大的 500 个 Topic 里）时，脚本不再默认
-去逐个子领域穷举扫描——那是 ~250 个请求、几分钟、且会吃光一分钟配额；它直接
-落到 `/papers/search` 自由词句检索，通常一样找得到。确实需要那个 Topic id 时
-加 `--deep-topic-scan` 强制扫（会明确告诉你扫了多少、失败多少）。
-
-**成本与节奏**：`/ask` 免费档 **2/min**，一次 ~3-12k input token；多领域连跑
-时除最重要的一个外都加 `--no-synth`。`read:paper` 免费档 **60/min（固定窗）**，
-脚本按 `--throttle`（默认 1.05s）自节流并在 429 时按服务端 `Retry-After` 退避
-（最多 3 次）。因此阶段 1a 的墙钟主要是节流本身：默认参数约 80 秒，`--limit 30
---similar 2` 要 2 分钟以上。**不要为了快把 throttle 调小**——0.15s 那档正是
-上个版本静默丢论文的原因。
-
-**看到 `!! WORKLIST INCOMPLETE` 必须处理**：它表示有论文因取详情失败被丢掉，
-清单短是限流造成的，不是这个领域小。如实告诉用户丢了几篇，重跑或调大
-`--throttle` 后再进下一阶段——**不要拿一份缺行的清单当作检索结果去做综述**。
-
-**自由词句检索现在钉死语义层（0.5.1）**：以前默认走 `mode=auto`，服务端瀑布
-只要标题层凑够 3 条命中就采纳、语义层再也不执行——于是一个很大的方向只回来几行，
-而且**还慢**。同一个查询实测：`mode=auto` 23.2s / 走完标题层才落到语义，
-`mode=semantic` 1.65s，结果集相同。所以标题层那 21.5 秒是纯白付。
-真要按标题定位某一篇时用 `--search-mode title`；`--search-mode auto` 保留为逃生口。
-
-**改成语义层之后，失败模式换了一种，必须换判据**：池子不会再薄，但可能**整批落进
-错误的簇**——行数满、看起来健康、每个下游 gate 都放行。脚本因此在检索后无条件打印
-`semantic top-1 score=… (in dominant cluster […])`。**判据的主体是那个 cluster，
-不是分数**：cluster 不是你的领域就是没打中，没有例外，而这一条只能由你来判。
-分数只是弱提示（阈值 0.56 时才告警）。看到告警**不要带着这个池子进阶段 1b**，
-把目标改写成更长更具体的一整句重跑——拿一个落错簇的池子去归纳章节，会得到一份
-读起来很像样、却和用户的方向无关的 taxonomy，而后面每一步都会忠实地顺着它走。
-
-⚠️ **阈值曾定成 0.60，上线第一次跑就误伤**：`mixture of experts routing in sparse
-transformers` 拿 0.5936 被判 miss，而它 8 条结果全对。实测 miss ≤0.542、hit 从
-0.5936 起，0.60 卡在 hit 区间里。**别再往上调。**
-⚠️ **分数高不代表查询够具体**：`graph`（1 词）拿 0.6102 且 cluster 正确——「太泛」
-这一类没有阈值抓得到，只能靠「写成一整句」在源头避免。查询短于 4 个词时脚本会先
-提醒——`chain-of-thought prompting`（2 词）实测把整批结果拽进「教育领导力」簇。
-
-**Phase gate → 阶段 1b**：`worklist.jsonl` 存在、每行合法 JSON 且
-`doi`/`arxiv_id`/`oa_url` 至少一项非 null 的行占多数、**没有 INCOMPLETE 横幅**，
-**且池子 ≥ 计划深读篇数的 2 倍**——最后这条是新加的：只看「行数 ≥ 目标的 8 成」
-会让一个 7 行的池子为 6 篇的目标开绿灯，阶段 1.5 就没什么可收敛的了，收敛这一
-步的价值全在于有得挑。不满足先修阶段 1a，不要带病进入下一阶段。
-
-## 阶段 1b — 归纳章节（taxonomy.json）
-
-阶段 1a 交出来的是一个**平的**池子。在下载任何 PDF 之前，先把它归纳成一份章节
-表——这是整条流水线上唯一一次「在材料还很薄、上下文还很空」的时候做结构决策的
-机会，后面的收敛、派工、综合全部顺着它走。
-
-先补材料（worklist 行里**没有** tldr / methods，只有 id/标题/日期/venue/标识符）：
-
-```sh
-cd pd-research/<slug>/
-source ~/.paperdaily-cli/env
-IDS=$(jq -r '.id' worklist.jsonl | head -100 | jq -R . | jq -sc .)
-curl -sS -X POST "$PD_BASE/papers/batch" \
-     -H "Authorization: Bearer $PD_KEY" -H 'Content-Type: application/json' \
-     -d "{\"ids\": $IDS}" > worklist.extractions.json
-jq '{got: (.items|length), missing: (.missing|length)}' worklist.extractions.json
-```
-
-`POST /papers/batch` ≤100 id/次，**整批只算 1 个 rate-cost 单位**——别逐篇
-`GET /papers/{id}`。池子 >100 篇分两批。`missing` 非空要转告用户（那几篇图谱里
-查不到，1b 只能看它们的标题）。
-
-然后用 **org 视图**（id / 标题 / 年 / `tldr_en` / `methods[].name` /
-`contributions` / `key_claims` / `limitations` / `open_questions` /
-`identification.strategy` / `sample.{period,region,unit}`）归纳出 3–8 个
-节点、最多两层，落盘 `taxonomy.json`。
-
-`identification` / `sample` 是 **v0.9.26 起**才导出的两个字段（经管法的章节划分常
-按识别策略走，所以它们值得单列）。⚠️ 两点别搞错：它们只存在于 v2 抽取 schema，
-约四分之一的已抽取论文才有，**`null` 是「不知道」不是「没有识别策略」**；而且带值
-的那批里 `strategy` 多半是 `"none"`。**能拿来切章节，不能拿来统计**——按年份分组
-会把 schema 上线的波前读成假的结构断点。节点形状、三种 `role` 的分工、完整提示词
-骨架、以及「怎么判这份 taxonomy 切得好不好」，全部在
-[references/taxonomy-routing.md](references/taxonomy-routing.md) §1 / §3。
-
-两条最容易做错的：
-
-- **按分歧切，不按时间切。** 切成「早期/近期」的 taxonomy 在阶段 3b 会退化成
-  流水账，因为每一节内部没有可争论的东西。
-- **只能装下一篇的节点不要单独设**，并进相邻节点——8 节 × 每节 ≥2 篇已经是
-  「正经方向综述」档位的上限。
-
-## 阶段 1c — 反向路由（routing.jsonl）
-
-**每篇论文**问「你属于哪几节」，而不是每节问「谁属于我」。方向反过来是刻意的：
-正向分配会让模型为了填满每一节而硬塞，反向允许一篇论文**属于零个节点**——池子
-里本来就有噪声，这个出口必须留着，而且它拉低的那个覆盖率正是我们要量的数。
-
-**10 篇一批**，每批把**完整的 taxonomy** 连同这 10 篇的 org 视图一起送（taxonomy
-不能分批：模型只会在看得见的那几节里选）。每篇输出一行：
-
-```json
-{"paper_id": "arxiv:2409.10897", "nodes": ["n2a", "n3"], "why": "一句话"}
-```
-
-- `paper_id` **逐字**等于 `worklist.jsonl` 的 `.id`；
-- `nodes` 0–3 个，**按相关性降序**——`nodes[0]` 是**主属节点**，阶段 3a 按它派工；
-- 哪一节都不贴切就 `[]`，不要硬塞。
-
-追加进 `routing.jsonl`。提示词骨架见 taxonomy-routing.md §4。
-
-## 阶段 1d — 确定性校验（pd_route_check.py）
-
-1b 和 1c **都是 LLM 在写 id**，而 LLM 写错 id 的失败方式恰好是眼睛看不出来的
-那一类：编一个不存在的 paper_id、把节点标题当成节点 id 写进去、同一篇出现两次、
-给一篇挂五个节点、或者只路由了三分之一的池子。每一种都会让后面的「按节精读 →
-按节综合」看起来在正常工作，而覆盖面早就塌了。所以这一步是机械的：
-
-```sh
-python3 scripts/pd_route_check.py --dir pd-research/<slug>/
-python3 scripts/pd_route_check.py --dir pd-research/<slug>/ --json   # 机器可读
-```
-
-退出码就是判据：
-
-| 码 | 含义 | 你该做什么 |
-|---|---|---|
-| 0 | 通过（可能带 WARN） | 进阶段 1.5 |
-| 1 | coverage < 0.6 | **重跑 1c**（见下） |
-| 2 | 结构性错误 | 按 ERROR 修 `taxonomy.json` / `routing.jsonl` 再跑 |
-| 3 | 文件缺失 / JSON 坏掉 | 前一步根本没产出工件 |
-
-**coverage 不够时要重跑的是路由，不是降门槛。** 把 `--json` 里的 `unrouted`
-单独捞出来、连同完整 taxonomy 再送一轮（每批 5 篇，prompt 里说明「上一轮都没
-找到归属，请再判一次，仍不贴切照旧给空数组」），取覆盖率更高的那一轮。两轮之后
-仍不够，说明是 **taxonomy 没盖住这个池子**——回 1b 重切章节，典型症状是未路由的
-那批彼此有明显共性（例如全是应用论文）。**不要**调低 `--coverage-target`（它是
-判据不是参数），**不要**把未路由的论文从 worklist 里删掉（那是在改分母）。
-
-⚠️ **结构性错误盖过 coverage**：路由表本身不合法时那个覆盖率没有意义（一半 id
-写错，覆盖率会「看起来」很低，而真正要修的是 id），所以两者同时出现时退 2。
-看到退 2 就不要读那个 coverage 数字。
-
-⚠️ 两个 WARN 值得停下来看，脚本不会替你决定：
-- **analytical 节点只有次属论文**（`primary=0` 而 `total>0`）——阶段 3a 按主属
-  节点派工，这一节不会有人读。把某篇的 `nodes` 顺序调过来，或者并掉这一节。
-- **analytical 节点 <2 篇**——阶段 1.5 的按节收敛下限就是 2，现在就并掉比收敛
-  时再返工便宜。
-
-**收尾：重写 `overview.md`。** 校验通过后把它改成「taxonomy + 路由表」——章节
-地图（树形带篇数）、每节的描述/关键问题/论文表（标主属还是次属）、「未路由」表
-（每篇写一句为什么）、文末「附：检索期 `/ask` 背景综述」保留 1a 的原文。
-完整样例见 [references/examples/overview.md](references/examples/overview.md)。
-**不要改这个文件名也不要拆成两个**：`upload_session.py` 按 `overview.md` 把它
-inline 进回传 payload（SKILL_SPEC §8「核心件名不改」）。
-
-**Phase gate → 阶段 1.5**：`pd_route_check.py` 退 0，且 `overview.md` 已按新格式
-重写。
-
-## 阶段 1.5 — 按节收敛（候选池 → 真正深读的那批）
-
-阶段 1a–1d 给的是**带结构的候选池**，不是阅读清单。相似扩张来的尾巴通常有相当
-比例是噪声，而后面每一篇的代价是一次下载 + 一个精读子 agent + 一段综合上下文。
-所以在下载之前先收敛——这是整条流水线上性价比最高的一个动作。
-
-**0.6.0 起按节收敛，不按全局排名收敛。** 全局取前 N 的老做法有一个不会报错的
-失败模式：相似度高的论文往往来自同一支，取前 N 等于把一节取满、把另外三节饿死，
-而报告里看不出来——它只是在那三节上无话可说。按节收敛是把预算先分给章节、再在
-章节内部挑。
-
-做法：
-
-1. 打开 `overview.md` 的章节地图 + `pd_route_check.py --json` 的
-   `primary_counts`，把深读预算**先分到 analytical 节点上**：每个 analytical
-   节点 **≥2 篇**（少于 2 篇的那一节没法做对比，要么补要么并掉），剩余预算按
-   节点的重要性（对用户真实问题的贴合度）追加。
-2. 在每一节内部挑：覆盖不同方法路线 > 时间跨度（早期奠基 + 最新进展）>
-   引用量或 venue。**不要在节内也只按相似度取前 N。**
-3. `reflective` / `navigational` 节点通常**不单独占深读名额**——它们的材料来自
-   别的节点那些论文的 `limitations` / `open_questions`，以及综述本身（综述类论文
-   即使不精读，摘要级参与也够用）。
-4. 让用户增删，然后落盘**两个**文件。**id 打错一个字符，`select` 只会让文件
-   变短、不会报错**，所以这个配方自带核对——没匹配上的 id 会打出来：
-
-   ```sh
-   cd pd-research/<slug>/
-   SEL='["arxiv:2409.10897","W4416083181"]'          # ← 选中的 id
-   jq -c --argjson sel "$SEL" 'select(.id as $i | $sel | index($i))' \
-     worklist.jsonl > worklist.selected.jsonl
-   jq -c --argjson sel "$SEL" 'select(.paper_id as $i | $sel | index($i))' \
-     routing.jsonl > routing.selected.jsonl
-   # 核对：期望数 vs 实得数，并列出没匹配上的 id
-   jq -n --argjson sel "$SEL" --slurpfile got worklist.selected.jsonl '
-     ($got | map(.id)) as $ids
-     | {wanted: ($sel|length), got: ($ids|length),
-        unmatched: ($sel - $ids)}'
-   ```
-
-   `unmatched` 非空就是写错了（或那篇本来就不在池子里），先修再往下走。
-
-5. **用同一把尺子量收敛后的那批**——这是 0.6.0 才有的机检，以前这一步的判据
-   只写在文字层：
-
-   ```sh
-   python3 scripts/pd_route_check.py --dir pd-research/<slug>/ \
-       --worklist worklist.selected.jsonl --routing routing.selected.jsonl \
-       --coverage-target 1.0
-   ```
-
-   收敛后 coverage 必须是 **1.0**（选中的每一篇都该有归属，没有归属的就不该
-   被选中），且**不能出现孤儿 analytical 节点**——出现了就是这一节被收敛干净
-   了，回到第 1 步补两篇或者把这一节从 taxonomy 里并掉（并掉要同步改
-   `taxonomy.json`，否则 3b 会按一个不存在的结构去写）。
-
-6. 阶段 2 用 `--worklist worklist.selected.jsonl` 跑（`worklist.jsonl` 原样保留：
-   阶段 4 的幂等指纹按它算，代表这一轮检索的完整 provenance）。
-
-用户明确说「全都要」时照办，但先把篇数和大致耗时说出来。
-
-**把判断写进 `decisions.md`**：规模定在几篇、为什么选这些不选那些、遇到疑似
-重复怎么处理的。这条流水线会跑很久，用户回来看结果时往往已经不记得当时同意
-了什么；`report.md` 讲的是论文，`decisions.md` 讲的是你。
-
-**注意 `overview.md` 的论文表是收敛之前的**——它列的是整个候选池，不是最终选中
-的那几篇。**章节结构**（taxonomy）跨过收敛继续用，**论文名单**不要：写
-`report.md` 时按 `routing.selected.jsonl` 重算每节的清单。文末那段 `/ask` 背景
-综述更是如此（它写在章节划分之前），不要当成对最终清单的综述直接引用；`/ask`
-免费档 2/min，通常不值得为收敛后的清单再生成一次，但要在报告里说清这个时间差。
-
-**worklist 行的规范形状**（手工加行时照这个填，别少字段——阶段 2 只认这三个
-定位字段，缺了就只能落 L7 人工兜底）：
-
-```json
-{"id":"arxiv:2409.10897","title":"…","publication_date":"2024-09-17","venue":null,
- "doi":null,"arxiv_id":"2409.10897","oa_url":"https://arxiv.org/abs/2409.10897",
- "source":"seed"}
-```
-
-- `id` — 全流程主键，笔记正文的 `**paper_id**` 必须与它逐字一致；
-- `doi` / `arxiv_id` / `oa_url` / `pdf_url` / `urls_extra` — 阶段 2 的**全部**
-  输入，至少一项非 null；缺失字段写 JSON `null`，**不要写空字符串**；
-  `pdf_url` 由阶段 1a 从 v1 的 `resolved_pdf_url` 带出（老服务端为 null），
-  `urls_extra` 是数组，由你跑完网页检索后回填（见阶段 2「检索回填回路」）；
-- `arxiv_id` 是裸号（`2409.10897`，可带 `v2`），不带 `arxiv:` 前缀；
-- `source` — `primary` / `similar` / `seed`，只用于阅读顺序，不影响取全文。
-
-## 阶段 2 — 全文获取（分诊 → 瀑布 → 检索回填 → 浏览器）
-
-**先分诊，再决定语料。** 直接对整份清单跑下载，是把「这批能不能拿到」的答案
-推迟到选完语料之后——顺序反了。分诊只跑查询层、不下载任何 PDF：
-
-```sh
-export UNPAYWALL_EMAIL="you@example.org"          # 免费，只发给 polite-pool API（见下）
-
-python3 scripts/fetch_fulltext.py --worklist pd-research/<slug>/worklist.jsonl \
-    --out pd-research/<slug>/pdfs/ --triage
-```
-
-产出 `triage.jsonl`，每篇一个可达性标签：
-
-| 标签 | 含义 | 下一步 |
-|---|---|---|
-| `direct-pdf` | arXiv 号，或已有 `urls_extra` | 直接下 |
-| `oa-pdf` | Unpaywall 给了真正的 OA PDF | 直接下 |
-| `title-search` | 找到了同一篇的**开放兄弟版本**（工作论文/会议稿） | 直接下，但注意版本差异 |
-| `repo-landing` | 兄弟版本只有记录页 | 下载时多一跳，可能失败 |
-| `browser-needed` | 只有出版商链接，没定位到开放副本 | 要么放弃，要么走浏览器层 |
-| `paywalled-only` | 所有查询层都没有 | 每篇要花一次网页检索 |
-
-拿这张表和用户一起按**相关性 × 可得性**定阶段 1.5 的语料。经验判据：
-`paywalled-only` 占比超过一半时，与其硬啃这一批，不如回阶段 1a 换检索面——
-一次网页检索一篇的成本，乘以 10 篇就是整个流程最贵的一段。
-
-然后正式跑：
-
-```sh
-# export PD_FETCH_INSTITUTIONAL=1                 # 见下方合规边界
-# export PD_FETCH_CDP=1                           # 用你自己的 Chrome 会话，见下
-# export ELSEVIER_TDM_KEY=… WILEY_TDM_TOKEN=… S2_API_KEY=…   # 可选
-
-python3 scripts/fetch_fulltext.py --worklist pd-research/<slug>/worklist.selected.jsonl \
-    --out pd-research/<slug>/pdfs/ --jobs 4
-```
-
-（跳过了阶段 1.5 就传 `worklist.jsonl`；但候选池超过 20 篇时先回去收敛。
-账本 `fetch_report.jsonl` 的路径由 `--out` 的父目录决定，两种输入都落同一处。）
-
-**墙钟**：每主机 1s 节流不变，`--jobs N` 只在**不同主机之间**并行（10 篇分散在
-10 个站点时实测 87s → 35s）。单篇 PDF 常见 2-8 MB，跨境带宽差时仍可能十几分钟。
-断了直接重跑：已下好的 PDF 判 `already` 跳过（幂等）。
-
-### 检索回填回路（这一层承重，别跳）
-
-瀑布的 L0-L4b 全部按 DOI / arXiv 号定位。对**闭源期刊的经管法**论文这在构造上
-就是死路：DOI 只登记在付费的正刊版上，于是 Unpaywall、PMC、乃至这篇自己的
-OpenAlex `best_oa_location` 全都如实回 `miss`。2026-08-02 那次 10 篇全灭的实测：
-8 个 DOI 里 5 个完全没有 OA 位置，2 个指向 SSRN 落地页——**配上
-`UNPAYWALL_EMAIL` 最多也只能救回其中一篇**。
-
-但开放副本通常是存在的，只是以**另一个 work** 的身份：SSRN / NBER / 会议 /
-作者主页的工作论文，有自己的 id、自己的（不同的）标题。学术聚合器不一定收录，
-通用网页检索能找到——那次最终用的 6 篇里，`acfr.aut.ac.nz`（会议稿）、
-`efmaefm.org`、`sfmitali.gitlab.io`（作者主页 JMP）都是这么来的，而一次标题检索
-就能命中第一条。
-
-脚本跑不了通用网页检索（DDG/Bing 对脚本客户端软封锁，keyless S2 首请求就 429），
-**但你能**。所以穷尽后它把活交回来：
-
-```sh
-cat pd-research/<slug>/needs_web_search.jsonl
-# {"id":"hhag020","title":"…","suggested_query":"\"…\" filetype:pdf", …}
-```
-
-1. 对每行跑**一次**网页检索（用 `suggested_query`）；
-2. 把找到的 PDF 或记录页 URL 写回该论文的 worklist 行：
-   `"urls_extra": ["https://…/paper.pdf"]`；
-3. 重跑同一条命令——已下好的跳过，只补这几篇。
-
-一篇一次检索，**不要为一篇论文连着搜三轮**；两次没有就标 `paywalled-only`
-交给用户定夺。
-
-⚠️ **命中的多半是另一个版本。** 账本会写 `version: "alternate"` 和
-`matched_title`。页码、样本量、表号在版本之间不通用——精读笔记必须记清读的是
-哪一版（见 reading-note-template.md「版本铁律」），拿工作论文的数字去描述正刊
-结论是实打实的错误陈述。
-
-### 浏览器层（用你自己的 Chrome 会话）
-
-上面所有层说的都是普通 HTTP 客户端能看到的互联网：Cloudflare 挡的期刊回 403，
-校园代理/SSO 后面的内容回登录页，靠 JS 拼下载链接的仓储回 HTML。**你的浏览器
-这三样都能看**，因为 cookie 在它那儿。`pd_browser_fetch.py` 借的就是这个会话。
-
-一次性设置：打开 `chrome://inspect/#remote-debugging` 把开关打开（不用重启
-Chrome，也不用装任何东西）。**必须用你日常那个 profile**——新开的干净 profile
-没有任何会话，那就白设了。然后：
-
-```sh
-python3 scripts/pd_browser_fetch.py --list            # 确认连得上
-python3 scripts/pd_browser_fetch.py --url "https://doi.org/10.1093/rfs/hhag020" \
-    --out pd-research/<slug>/pdfs/hhag020.pdf
-# 或整批：--worklist … --out pdfs/   （产出 browser_fetch_report.jsonl）
-# 或让瀑布自动用它：export PD_FETCH_CDP=1
-```
-
-碰到人机验证或登录墙时，脚本**停下来等你在浏览器里点完**（默认 180s，
-`PD_CDP_WAIT_HUMAN` 可调），然后自己继续。agent 不解验证码，也解不了——
-这一步只能是你。一个域名过一次，通常够覆盖整批。
-
-**不要用截图点按钮的方式做这件事**：Chrome 能把 PDF 显示出来而字节不在 DOM 里，
-点"下载"进的是浏览器自己的下载队列、调用方拿不到路径。2026-08-02 卡掉 22 分钟
-就是卡在这里。真正出字节的只有两条机制，脚本两条都用：落地页上下文里的
-同源 `fetch(credentials:'include')`，和 `Browser.setDownloadBehavior` + 下载完成
-事件。浏览器路线**最多试 3 分钟**，不出字节就转公开仓储/作者稿/网页检索。
-
-### 校园网内取订阅全文（主路）
-
-**这一层的正确用法：agent 就在校园网内的机器上跑，直连出版商；撞上人机验证时
-把浏览器顶到你面前，你点一下，脚本接着往下取。**
-
-```sh
-# ① 先确认你真的在授权网段内 —— 这一步别跳
-python3 scripts/pd_browser_fetch.py --whoami
-
-# ② 确认后开这两个开关，正常跑瀑布
-export PD_FETCH_INSTITUTIONAL=1     # 出版商直连
-export PD_FETCH_CDP=1               # 撞验证时借你自己的 Chrome
-python3 scripts/fetch_fulltext.py --worklist … --out …/pdfs/ --jobs 4
-```
-
-**为什么 `--whoami` 是必做的第一步。** 本地直连模式最容易踩的坑，是**以为自己
-在校园网内而实际不在**——挂着 VPN、在家、或走了运营商出口。那时每一篇都会返回
-"无权限"，看上去像图书馆没订，其实只是出口 IP 不对，而这个错误会**静默地污染
-一整批**。学校的授权网段没有公开清单，猜不出来，所以不猜：直接用**将要去取全文
-的那个浏览器会话**打开出版商页面，读它自己回显的机构名。
-
-```
-$ python3 scripts/pd_browser_fetch.py --whoami
-浏览器出口 IP: <你的出口 IP>
-  Springer  → <你的出口 IP> <Your University>
-              (<机构授权号>) - Springer <你所在的联盟> …
-认出了机构身份——这个浏览器处在授权网络内，可以直接取全文。
-```
-
-认不出就先接校园网/断 VPN，别硬跑。
-
-**撞上验证时会发生什么。** 脚本把那一页在你的 Chrome 里打开、**切到前台**、
-响一声铃，然后停下等你点完（默认 180s，`PD_CDP_WAIT_HUMAN` 可调），清掉后自己
-继续。agent 不解验证码，也不该解——这一步只能是你。一个域名过一次通常够覆盖整批。
-
-等待超时记 `blocked` 而不是 `denied`：人没来点，不代表没权限。
-
-### 三个判定别读错
-
-- `blocked` — 人机验证挡住了，**它对有没有订阅一无所知**。在浏览器里打开
-  `manual_url` 通常直接就有。
-- `denied`（出版商页面明确给出购买入口）— 出版商官网确实没权限，但 **DOI 永远
-  指向出版商**，而图书馆常常是通过 EBSCO / ProQuest / JSTOR 买的这本刊。转
-  L7 之前值得先去聚合平台按**刊名**检索一次。
-- `partial` — 拿到的是**试读片段**（`%PDF` 合法、能打开、有文字层，只是页数
-  对不上原文页码范围）。**不要送进精读**，否则笔记会引到原文里不存在的页，
-  而账本上写着"已获取全文"。
-
-**中途怎么看进度**：`[i/n]` 进度行走 stderr（0.4.1 起逐行 flush）。但如果你把
-输出重定向到文件，**最可靠的进度信号是 `fetch_report.jsonl`**——它每完成一篇就
-落盘并 flush，`wc -l` 一下就知道走到第几篇了。别因为日志文件没动就判定卡死。
-
-瀑布逐层尝试、命中即停：arXiv 直连 → **paperdaily 自己已解析出的 `pdf_url`** →
-API 给的 `oa_url`（是裸 doi.org 的直接跳过，那不是 OA 链接）→
-你回填的 `urls_extra` → Unpaywall → PMC/Europe PMC →
-出版商 TDM API（有 key 才走）→ **标题检索开放兄弟版本** → 机构订阅直连（opt-in）
-→ **你自己的 Chrome 会话**（opt-in）→ Playwright 兜底（opt-in）→
-落 `needs_web_search.jsonl` 交回给你。细节与排查见
-[references/fulltext-sources.md](references/fulltext-sources.md)。
-
-**邮箱去哪（隐私边界）**：`UNPAYWALL_EMAIL` 只发给要求联系邮箱的 polite-pool
-API——`api.unpaywall.org` / `api.crossref.org` / NCBI-PMC / EBI（作查询参数）。
-它**不进 User-Agent**，所以出版商站点、CDN、从页面 metadata 抠出的第三方地址
-都看不到它；写进 `fetch_report.jsonl` 的 URL 也会把 `email`/`token`/`key` 类
-参数掩码成 `<redacted>`。凭证（TDM key、平台 key）遇跨 origin 跳转会被剥掉并
-在账本记 `cred_stripped_on_redirect`——所以跨域跳转后的 401 是**预期**，不是
-出版商故障。
-
-**合规边界（对用户说清楚再开）**：
-
-- 默认只走开放获取渠道，任何网络环境下都合法。
-- `PD_FETCH_INSTITUTIONAL=1` 启用出版商直连层——仅当用户机器在**自己
-  机构有订阅授权的网络内**（如校园网 IP 授权）才是合法访问。开启前
-  必须向用户确认这一点。
-- `PD_FETCH_CDP=1` 用的是用户**自己的浏览器、自己的登录、自己的权限**——
-  与上一条同一条线，只是更靠前一步。它不接触密码、不导出 cookie、
-  **不解验证码**（检测到就停下来等人工）。
-- 本 skill 不含、也不会添加 Sci-Hub 等绕过付费墙的渠道。
-- 账本里 `denied` 意味着「请求了但被拒（大概率无订阅权限）」，不要
-  当成技术故障反复重试。
-- 账本里 `blocked` 是**另一回事**：撞上人机验证，**它对有没有订阅一无所知**。
-  别读成没权限，也别为了过它去堆反检测手段——正确反应是让人在浏览器里
-  打开，或把 agent 挪到真正有授权的网段里跑。
-
-**Phase gate → 阶段 3**：账本里判为全文（`carrier` 是 binary-pdf /
-html-fulltext / parsed-fulltext 之一，或老账本的 `status` 是 ok/already）覆盖
-**这一轮输入清单**的 6 成以上即可推进（付费墙论文拿不到是常态）；把失败
-清单和原因明确报给用户，问是否人工补齐（账本里有 doi.org 链接），
-不要沉默丢弃。全文缺失的论文在阶段 3 降级为「仅摘要参与综合」，
-且笔记与 claims 里必须标注 abstract-only。
-
-**「拿到全文」不等于「存下了 PDF 二进制」**：把公开 PDF 完整解析成保留页序的
-Markdown 来精读，是合法的全文载体。这种情况在账本里写
-`{"id":…, "status":"ok", "carrier":"parsed-fulltext", "url":…}`（可以单独写进
-`fulltext_report.jsonl`，阶段 4 会一起读），不要另建一套账本，也不要因为
-`pdfs/` 里没有文件就把它降级成 abstract-only。前提是**页序真的保留了**——
-没有页标记的解析结果按 `anchor-degraded` 处理。
-
-## 阶段 3 — 深度文献分析（agent team）
-
-进入前校验：`pdfs/` 有文件、每个 PDF 前 4 字节是 `%PDF`（阶段 2 的
-脚本已保证）、清单与 PDF 能按 `<paper_id>.pdf` 对上。
-
-**允许与阶段 2 重叠**：链路慢的时候，已经下好的论文可以先派出去精读，不必等
-整批下完——`fetch_report.jsonl` 是逐篇 flush 的，可以拿它当就绪信号。**但
-3a→3b 的 gate 仍然按整批算**（笔记数 = 本轮参与深读的篇数），不能因为先开工
-就提前进综合。
-
-这是全流水线唯一没有脚本兜底的一段，质量全靠派工说清楚。**动手前先读
-[references/deep-read-agent-prompt.md](references/deep-read-agent-prompt.md)**
-——里面有现成的派工模板、PDF 读法规程和子 agent 回传契约，直接复制着用，
-不要自己现编提示词。
-
-### 3a 逐篇精读（按节 fan-out，sonnet）
-
-**0.6.0 起 fan-out 的单位是「节」不是「篇」**：一个子 agent 领一个 analytical
-节点（篇数多就拆成同节的两批，见下），拿到「这一节的 `description` +
-`key_questions` + 属于它的那几篇」，一次把这批读完、每篇各出一份笔记。理由是
-逐篇派工的子 agent 不知道自己这篇在整体里的位置，回来的笔记彼此之间没有可比的
-轴，综合阶段只能重新对齐；给它节点的关键问题，它读的时候就知道该盯什么。
-
-**「属于它的论文」= 主属论文，按 `routing.selected.jsonl` 的 `nodes[0]`。**
-这条规则是为了保住一个不变量：**一篇论文只被读一次，只产一份
-`notes/<paper_id>.md`**，于是 3a→3b 的 gate（笔记数 = 参与深读篇数）继续成立。
-一篇论文挂在两节上时，第二节的 agent 只在材料里看到它的标题与 tldr 作背景，
-**不为它写笔记**——那份笔记由主属节点的 agent 写，两边都要引用同一个文件。
-
-```sh
-# 每节的主属论文（派工时按 node 分组）
-jq -r 'select(.nodes|length>0) | "\(.nodes[0])\t\(.paper_id)"' \
-   routing.selected.jsonl | sort
-# 各节主属篇数（对照 pd_route_check --json 的 primary_counts）
-jq -r 'select(.nodes|length>0) | .nodes[0]' routing.selected.jsonl | sort | uniq -c
-```
-
-⚠️ **一个子 agent 最多 3 篇全文，超了就把这一节拆成两批。** 这是 0.4.0 那条
-「一篇论文一个子 agent」的保留部分：子 agent 同时持有多篇全文时，留给逐页锚定
-核对的注意力会被摊薄，而 `anchor_coverage` 这道闸门是逐篇判的——一个领了 7 篇的
-agent 会以「每篇都差一点」的形式失守，比彻底失败更难发现。按节派工换来的是
-**子 agent 知道自己在找什么**（它拿到了这一节的 `key_questions`），不是省 agent
-数量；这两件事不冲突，拆批就行。拆的时候按年份或方法路线切，别随机切。
-
-`reflective` / `navigational` 节点**不派 agent**（它们通常没有主属论文，材料来自
-别节论文的 `limitations` / `open_questions`）。
-
-派工模板见
-[references/deep-read-agent-prompt.md](references/deep-read-agent-prompt.md)
-（§二「按节派工的节点头」是 0.6.0 加的）——在逐篇模板前面加一段节点头（这一节
-是什么、要回答哪几个问题、这批是哪几篇），然后让子 agent **对每一篇**照模板
-完整走一遍并各出一份笔记。
-
-每篇仍产出 `notes/<paper_id>.md`。三条铁律不变：
-
-- **页码必须来自保留分页的读法**（Read 工具带 `pages` 参数，或
-  `pdftotext -layout` 数换页符）。用丢掉分页的方式读完再回填页码，等于
-  编造锚点——这是本 skill 最容易悄悄失守的一条。
-- 每个字段锚定 PDF 具体位置（`(p.X)` / `(p.X, Fig.Y)` / 最低 `(§N.M)`），
-  禁止「论文说」；拿不到可靠页码就标 `anchor-degraded` 并如实降级。
-- 子 agent **不要把笔记正文回传**，只回 paper_id / note_path / depth /
-  pages_read / anchor_coverage / 3 条 headline / unresolved。笔记已经在磁盘上，
-  正文回传只会挤掉综合阶段的上下文预算。按节派工时**每篇一组**回传这些字段，
-  另加一段 ≤150 字的「这一节的共同点与分歧」——那一段是 3b 的起点，但它是
-  **附加**不是替代，不要拿它顶替逐篇的机械字段。
-
-回传的 `anchor_coverage` 比值低于 0.8、或 `depth` 与 fetch 账本矛盾（账本说 `ok`
-却回了 abstract-only）的，**重派该篇**，不要在综合阶段补。子 agent 回了"全部字段
-已锚"这类话而不是数字比值时，先要比值——这条规则的价值就在于它是机械的。
-
-**按节派工不改 3a→3b 的 gate**：仍然是 `notes/` 文件数 = 本轮参与深读的篇数。
-按节派工时最容易漏的是「某个节点的 agent 挂了」——它一次带走好几篇，而笔记数
-对不上是唯一信号。派完逐节点核一次：
-
-```sh
-# 应有的笔记数 = 主属论文数；实际 = notes/ 里的文件数
-jq -r 'select(.nodes|length>0)|.paper_id' routing.selected.jsonl | wc -l
-ls notes/*.md | wc -l
-```
-
-### 3b 按节综合（opus / 会话主模型）
-
-全部笔记就绪后（phase gate：`notes/` 文件数 = 本轮参与深读的论文数，
-含 abstract-only 的那些），按
-[references/synthesis-templates.md](references/synthesis-templates.md)
-产出 `synthesis/` 四件套 + claims 账本：
-
-1. 方法对比表、2. 时间线、3. 流派/分类法、4. 矛盾点与研究空白清单；
-5. `claims.jsonl` —— 每条跨篇论断挂证据（论文+页码）与四态
-   （supported/weak/contested/gap），**无证据必须标 gap，禁止用模型
-   常识补全**。
-
-**0.6.0 起综合按节结构走，不临时发明结构**：
-
-- 四件套里的第 3 件（流派/分类法）**就是 `taxonomy.json`**，不要在这里重新
-  归纳一遍。它此刻已经被两轮验证过：1d 的机械校验，以及阶段 3a 的子 agent
-  带着各节的 `key_questions` 实际读过一遍。要改就明说「读完之后我把 n2 拆成
-  两节 / 把 n4 并进 n1」并落回 `taxonomy.json`，**不要留下两份互相不一致的
-  章节划分**。
-- 逐节先出一段 150–250 词的小结，回答该节的 `key_questions`，只引这一节的
-  论文（主属 + 次属都能引）。全部节点写完再写跨节的部分（矛盾点、时间线）。
-- `reflective` 节点的材料是**别节论文的 `limitations` / `open_questions`**，
-  它没有自己的精读笔记——写它的时候去读那些笔记的对应字段，不要现编。
-- `claims.jsonl` 的每行可以加一个 `"node": "<node id>"` 方便本地按节组织。
-  ⚠️ **它不会被上传**：`upload_session.py` 只取 `claim` / `status` / `evidence`
-  / `note` 四个键（服务端 schema 没有这个维度），所以别把只有 `node` 才说得清
-  的信息藏在那儿。
-
-写 claims 时一次性对齐三条闸门，别等到阶段 4 才发现要返工：
-
-| 闸门 | 判据 | 不过会怎样 |
-|---|---|---|
-| 本地回传门 | 证据非空率 ≥ 80% | `upload_session.py` 直接拒传 |
-| 服务端计分门 | **每一条非 gap 的 claim 都要带证据** | 传得进去但不计积分（静默） |
-| 发芽 | gap/contested 会原样进用户的问题收件箱 | 写几条就给人塞几条问题 |
-
-最省事的做法是按最严的那条来：**非 gap 的一律配齐证据**，gap 的写成用户真会
-想回答的问题。
-
-综合难度高，用 `opus`（或不指定 model 由主会话直接做）。最后按模板的
-报告结构整合成 `report.md`，**章节顺序照 `taxonomy.json` 的树**（顶层节点按
-`navigational` → `analytical` → `reflective` 的顺序读起来最顺），正文论断随文标
-`[paper_id p.X]` 引用。每节末尾带一行本节的论文 id 清单，便于读者回查。
-
-**`report.md` 这个文件名会撞上一些 agent 运行时的写入护栏**（有的 harness 禁止
-子 agent 写 report/summary/findings 命名的文件）。撞上了就用 shell heredoc 写同一
-个路径，不要改名——`upload_session.py` 的回传门按 `report.md` 找它，改名等于过不了门。
-
-### 3c 追问模式（可选）
-
-报告交付后用户继续提问时，采用 PaperQA2 范式而非直接全量重读：先在
-notes/（必要时回到 PDF 原文）里检索相关段落 → 每段做「问题语境下的
-打分摘要」→ 重排取最相关 → 生成带论文+页码引用的回答。找不到证据
-就明说「所给论文中未见」。
-
-## 阶段 4（可选）— 回传 paperdaily 工作台
-
-把本次深读的**分析产物**（notes / claims / report / overview）上传成
-paperdaily 的 reading session，之后可在
-`https://www.paperdaily.org/workbench?tab=reading` 回看、装配综述矩阵。
-
-**铁律：必须先征得用户一次明确同意才运行**——上传是写操作
-（SKILL_SPEC §4 同意点），默认姿态是只读。向用户说清这五点再问——
-**后两点是服务端会替他做的事，不说清就不算知情同意**：
-
-1. 上传的只有你自己的派生分析（笔记/论断账本/报告），**绝不含 pdfs/
-   与任何二进制**——原文永留本地（版权红线，AGENT_PROTOCOL §7）；
-2. 幂等：同一 worklist 重复上传返回既有 session（`deduplicated:true`），
-   不会产生重复条目；
-3. 需要 key 带 `write:reading` scope（额度 10/min、100/天，每人最多 100 个
-   session）；
-4. **「发芽」**：`gap` / `contested` 的 claim 会被服务端**原样复制**进他的
-   开放问题收件箱——你写几条，他就收到几条（详见阶段 3b 的三闸门表）；
-5. **积分**：过门的上传计一次积分，fulltext 笔记另有每篇加成，幂等重传不重复
-   计；服务端计分门比本地回传门严，可能传成功但不计分（同上表）。
-
-用户同意后：
-
-```sh
-python3 scripts/upload_session.py --dir pd-research/<slug>/            # 直接上传
-python3 scripts/upload_session.py --dir pd-research/<slug>/ --dry-run  # 先看要传什么
-python3 scripts/upload_session.py --dir pd-research/<slug>/ --task-id <id>
-                                  # 阶段 0 领取过收件箱任务时带上，上传成功自动完结该任务
-```
-
-脚本自带回传前 phase gate（不过门打印缺项清单、退出非零、不上传）：
-notes 存在且非空；`claims.jsonl` 每行 status ∈ supported/weak/contested/gap
-且 evidence 非空率 ≥80%；`report.md` 存在；papers ≤100、单篇笔记 ≤64KB、
-claims ≤200、report ≤2MB、单条 quote ≤500 字符。每篇 depth 按诚实账本
-推断：note 头部标注 `abstract-only` 优先，否则看 `fetch_report.jsonl`
-有无 `ok`/`already` 记录——只降级不冒充全文级。
-
-结果处理：201 打印 session id + 工作台回看 URL；200 + `deduplicated`
-提示已存在；带 `--task-id` 时看响应 `task_linked`——true 打印「已完结
-收件箱任务 <id>」，false 说明任务不存在/不属于你/已完结（session 照常
-入库，不连坐），如实转告用户；**403 = key 缺 `write:reading`**——引导
-用户去 `/account` → API Keys 重签一把勾上该 scope 的 key（不要代签、
-不要绕行）。
-
-两个必须转达、不能吞掉的响应细节：
-
-- **`unknown_paper_ids` 非空**：服务端在图谱里找不到这些 id。笔记和 claims
-  照常入库，但引用是悬空的。最常见的原因是笔记里的 `**paper_id**` 写成了安全化
-  文件名（`arxiv_2409.10897`）而不是原始 id（`arxiv:2409.10897`）。脚本会打印
-  这份清单——**核对后修正笔记重传**（幂等，不会产生重复 session），不要当没看见。
-- **429 有两种**：带 `X-RateLimit-*` 头的是限流（脚本已自动退避重试）；不带的
-  是「每人 100 个 session」的上限，重试无用，要去工作台删掉旧会话。脚本已经
-  按这个区分处理并给出对应提示。
-
-其余错误如实转告用户。
-
-## 本 skill 不做什么
-
-- 不改用户的 paperdaily 画像（follow/feedback 等 `write:profile` 操作）。
-- 不管理 API key（签发/吊销走 web UI）。
-- 不提供任何绕过付费墙的获取渠道。
-- 不静默上传：阶段 4 只在用户明确同意后执行，且永不上传 PDF/二进制。
-
-## Files
-
-- `scripts/pd_inbox.sh` — 阶段 0：agent 任务收件箱（列取 pending / `--claim` 领取；缺 scope 软降级，自包含 bash+curl+jq）
-- `scripts/pd_worklist.sh` — 阶段 1a：taxonomy/查询/种子解析 + 推荐池 + `/ask` 背景综述（自包含，bash+curl+jq）
-- `scripts/pd_route_check.py` — 阶段 1d：`taxonomy.json` + `routing.jsonl` 的确定性校验（纯标准库、只读、不发网络请求；退出码 0/1/2/3 就是判据）
-- `scripts/fetch_fulltext.py` — 阶段 2：零依赖瀑布下载器（`--triage` 分诊 / `--jobs` 跨主机并发 / 标题检索层 / `needs_web_search.jsonl` 回路；playwright 可选）
-- `scripts/pd_browser_fetch.py` — 阶段 2 浏览器层：借用户已有的 Chrome 会话取全文（纯 stdlib，内嵌 WebSocket 客户端，不依赖任何 MCP，任何 agent 都能 `python3` 调）
-- `scripts/upload_session.py` — 阶段 4：phase gate + 回传（纯 stdlib，绝不上传 pdfs/）
-- `references/taxonomy-routing.md` — **阶段 1b/1c/1d 规程**：taxonomy 与 routing 的 JSON 形状（与服务端 `llm/survey/` 同一契约）+ 两步的提示词骨架 + 校验判据 + coverage 不够时怎么补
-- `references/examples/` — 手造的 12 篇工件样例（worklist / taxonomy / routing / 反例 routing / 新格式 overview），`pd_route_check.py` 与仓库测试都拿它当输入
-- `references/deep-read-agent-prompt.md` — **阶段 3a 派工规程**：PDF 读法（页码从哪来）+ 子 agent 提示词模板 + 回传契约。派工前必读
-- `references/reading-note-template.md` — 阶段 3a 精读模板、锚定铁律与三个降级标记
-- `references/synthesis-templates.md` — 阶段 3b 四件套 + claims schema + 报告结构
-- `references/fulltext-sources.md` — 全文渠道手册：层级/配置/判据/排查/合规
+首传按 worklist 指纹幂等；HTTP 200 + deduplicated **不表示编辑已保存**，脚本会用
+`read:reading` 回读比较内容。成功后写 `upload_receipt.json`，包含目标服务、session ID 和内容哈希。
+改过报告/笔记/claims 后须显式 `--revise`，形成不可变私有新版本，原件保留。
+修订按内容与 root 去重，不重复产生上传/全文积分或问题草稿，仍占 session 数量。
+
+**修订依赖服务端新端点** `/me/reading-sessions/{id}/revisions`。
+客户端升级不代表该端点已部署；404/405 必须报告未保存并保留本地工件，禁止换随机指纹重传。
+未知 paper ID 必须转达；task_linked=false/缺失表示任务未闭环或未知，不冒报完成。
+HTTP 429 可能是配额或 session 上限，不能删除既有会话来自动腾位置。
+
+查询退出码沿用 thin：0 完成、2 参数、3 错误、4 partial、5 待消歧。
+上传退出码：0 已确认、1 配置、2 证据门失败、3 请求失败或未核实。

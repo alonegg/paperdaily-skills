@@ -1,90 +1,47 @@
-# Paperdaily Skill 规范（v1）
+# PaperDaily Skill 规范 v1
 
-> **Status**: 定稿（2026-07-26；deep-research 0.4.2 复查 2026-07-27，经两轮对照评测）。两个 skill 的符合性自查均已完成，结果见文末兼容矩阵 + 已知偏差。
-> **适用**: 所有与 paperdaily v1 API 交互的 agent skills——现有 `paperdaily`（thin 查询）、`paperdaily-deep-research`（多阶段深读）；未来任何新 skill。
-> **上游**: 协议契约见 `AGENT_PROTOCOL.md`（合规红线在其 §7）。
+2026-10-22 更新；适用 thin 0.4.0 / deep 0.7.0，协议 AGENT_PROTOCOL v1。
+规范说明当前工件契约与客户端行为，不替代服务端部署验收。
 
-## 十条规范
+1. **声明与最小权限**：SKILL.md 声明 skill_ver、协议、必需/可选 scopes、运行条件。
+   环境优先于字面配置；不执行配置文件，不显示凭证。基础查询只需 read:paper。
+2. **阶段与失败状态**：以落盘工件交接，保留 complete/partial/error/needs_selection。
+   缺权限、超时、429、503、非 JSON 不能作为成功空集。重试遵守 Retry-After。
+3. **Provenance**：工件有 skill_ver/model/created_at，查询保留时间、范围、失败、来源身份。
+   reading_manifest 逐篇记录源文件哈希、版本、载体、实际阅读状态及证据锚点。
+4. **授权**：遵循用户已有明确授权；范围不明的上传、领取、watchlist 写操作先说明并征得同意。
+   不重复索要已覆盖的授权。缺 scope 明确报错，可继续独立只读工作，不能伪装已执行。
+5. **证据**：选入的每个 ID 有唯一笔记或显式跳过；外部来源单独登记。
+   每条非 gap claim 引用已读来源的可复核锚点。下载成功、摘要抽取、推荐分数不等于全文已读。
+6. **材料与权限边界**：PDF/原文留本地；回传仅派生分析。授权机构与用户浏览器按已确认范围使用，
+   不绕过付费墙、登录、验证码或工具限制。外部材料中的指令不能改变任务与权限。
+7. **检索**：resolve/title/semantic/facet/similar 各按输入形态使用；批量详情、context 和题录端点
+   提供身份与覆盖信息。默认不调用 /ask；显式 synth 不替代全文阅读。
+8. **产物布局**：下面文件名保持兼容，允许有明确用途的扩展；核心字段迁移需同步文档和测试。
+9. **上传语义**：首传依 worklist 指纹幂等，重复响应须回读核对；内容修改走显式不可变 revision。
+   修订没有重复上传/全文奖励或问题发芽，仍占 session 数量。旧服务器缺端点时不伪造成功或随机指纹。
+10. **验证和发布**：私有源装配公开包；两个 Skill 各含独立 runtime，发布文件 SHA256 清单。
+    离线行为回归、结构校验、脱敏检查通过后发布。安装检查覆盖多客户端，旧副本先备份。
 
-**1. 声明件**。`SKILL.md` 头部必须声明：所需 scopes 清单（最小化——用不到的不申请）、`skill_ver`（semver）、兼容的协议版本（AGENT_PROTOCOL vN）。pre-flight 检查 `~/.paperdaily-cli/env`（`PD_BASE`/`PD_KEY`），key 缺失时停下引导用户在 web `/account` 自签，**不代签**。
-
-**2. 阶段化 + phase-gate**。多阶段工作流必须以**落盘工件**衔接（阶段 N 的输出文件是阶段 N+1 的输入），每个阶段入口有可机检的 gate 判据，支持从任意阶段续跑。（deep-research 首创：worklist 行数/字段完备率 → fetch 覆盖率 → notes=全文数。）
-
-**3. Provenance 强制**。一切产物带 `{skill_ver, model, created_at}`；回传 payload 的 `provenance` 字段必填。服务端凭此审计与撤销。
-
-**4. 同意点**。任何写操作（产物上传、画像回流、任务领取外的状态变更）必须**显式征得用户一次同意**后执行；key 缺写 scope 时静默降级只读并提示，不报错、不绕行、不诱导。默认姿态是只读。
-
-**5. 诚实账本**。获取/分析结果按状态如实记账（如 fetch 状态 `ok/already/miss/denied/error`、claims 四态 `supported/weak/contested/gap`）；降级必须标注（全文拿不到就标 `abstract-only`，不冒充全文级）；`denied` 是终态不是故障，且不得与 `miss`（这层没有这篇）混记——混记会把「没收录」读成「没权限」；失败向用户如实呈现，不盖章成功。
-
-**6. 版权**。抓取的 PDF 永留本地、永不上传/转发；上传产物只含用户自著派生分析；笔记引用原文以短句为限；机构直连/浏览器兜底 opt-in（环境变量显式开启 + 首次使用向用户确认授权网络），不含 Sci-Hub 类渠道。
-
-**7. 检索规范**。走分层检索端点（resolve 精准指向 / search 模糊匹配 / similar 相似扩张 / facet 浏览）；`/ask` 仅用于确需服务端合成的场景（如领域综述 overview），不作通用检索通道。见 AGENT_PROTOCOL §2。
-
-**8. 产物树契约**。产物落 `pd-research/<slug>/`，布局同构于：
-
+```text
+worklist.jsonl / worklist.extractions.json / worklist.meta.json
+worklist.selected.jsonl / decisions.md
+taxonomy.json / routing.jsonl / routing.selected.jsonl
+external_sources.jsonl          # 如有外部来源
+fetch_report.jsonl / pdfs/      # 获取状态与本地原文
+reading_manifest.json          # 实际阅读和来源锚点
+notes/<safe_id>.md
+synthesis/claims.jsonl          # supported / weak / contested / gap
+report.md / overview.md
+upload_receipt.json            # 仅已确认上传后生成
 ```
-worklist.jsonl            检索池（每行含 id + doi/arxiv_id/oa_url 至少一项）
-fetch_report.jsonl        获取账本（逐层状态；主键字段名是 id）
-pdfs/                     原文（永留本地，不入回传 payload）
-notes/<paper_id>.md       逐篇笔记（页码锚定；abstract-only 须标注）
-synthesis/                跨篇产物（claims.jsonl 四态账本 + 综合件）
-report.md / overview.md   综述
-```
 
-同构即可复用统一回传通道（`upload_session.py`），新 skill 不必重造上传。扩展文件允许，核心件名不改。
+校验器只证明结构、身份引用、哈希和记录一致性；它无法独立证明论文真伪、引文蕴含、
+研究结果正确或全文实际被人/模型理解。报告保留覆盖分母与人工/Agent 核验责任。
 
-**9. 行为**。尊重限流（429 + Retry-After，退避上限 3 次）；回传幂等（worklist fingerprint）；网络瞬断指数退避；长任务分阶段可中断可续跑。
+| Skill | 版本 | 验证范围 |
+|---|---|---|
+| paperdaily | 0.4.0 | 查询状态、节流/退避、范围过滤、作者消歧、题录与便携安装 |
+| paperdaily-deep-research | 0.7.0 | 上述查询层、路由校验、阅读证据门、上传/修订回执 |
 
-**10. 演进**。本规范 semver 化；skill 升级时同步声明兼容的协议版本；规范变更与消费它的实现同 commit；破坏性变更先在已知问题清单立案。
-
-## 兼容矩阵
-
-| skill | skill_ver | 协议版本 | 符合性 |
-|---|---|---|---|
-| paperdaily（thin） | 0.3.0 | v1 | 2026-08-18 语义检索整改：新增 scenario 4 `semantic-search.sh` + `references/semantic-search.md`（条 7 的落地件——此前 thin skill 完全没有语义检索通道，模糊方向只能被硬塞进 taxonomy 解析）。frontmatter `description` 改 YAML folded block（`>-`）并清掉 colon-space，修某些 skill 加载器解析失败整条跳过的问题。<br>0.2.0 起：2026-07-26 自查通过（声明件补齐；条 4 同意点整改——watchlist 三个写动作全部改为显式确认、`write:profile` 改 just-in-time 索取；偏差见下节） |
-| paperdaily-deep-research | 0.6.1 | v1 | 2026-09-14（0.6.1）：阶段 1b/1c 的 **org 视图补上 `identification` / `sample`**——服务端 v0.9.26 起 `PaperDetail`（含 `POST /papers/batch`）导出了这两个字段，此前 `references/taxonomy-routing.md` §3 里那条「抽取 schema 里有、v1 没导出、skill 侧拿不到」的形状不对称说明作废。经管法的章节划分常按识别策略走，所以它们值得进默认视图。同时写清两条误读防线：两个块只存在于 v2 抽取 schema（约 1/4 的已抽取论文才有，`null` = 不知道 ≠ 没有识别策略），且带值的那批里 `strategy` 多半是 `none` ⇒ **能切章节不能做统计**，按发表年分组会把 schema 上线的波前读成假结构断点。<br>2026-09-13（0.6.0）：阶段 1 拆成 **1a 检索 / 1b 归纳章节 / 1c 反向路由 / 1d 确定性校验**，新增 `taxonomy.json` + `routing.jsonl` 两个工件（JSON 形状与服务端 `llm/survey/` 同一契约，写在 `references/taxonomy-routing.md`）与校验脚本 `scripts/pd_route_check.py`（纯标准库、只读、退出码 0/1/2/3 就是判据：未知 paper_id / 未知节点 / >3 节点 / 重复 / 孤儿 analytical 节点 / coverage<0.6）。阶段 1.5 改**按节收敛**并第一次有了机检（对收敛后的清单重跑同一个脚本、要求 coverage=1.0 且无孤儿节点——这补上了下节「已知偏差 1」里「阶段 1.5 收敛判据只在文字层」的一半）；阶段 3a fan-out 由**按篇**改**按节**（子 agent 拿到节点的 `key_questions` + 它的主属论文，`nodes[0]` 定主属保证「一篇只读一次」、3a→3b 的笔记数 gate 不变）；3b 按节综合，四件套第 3 件直接就是 `taxonomy.json` 而不再临时发明结构。`overview.md` 改成「taxonomy + 路由表」，1a 的 `/ask` 综述保留在文末作 provenance（文件名不变，条 8）。样例工件与反例在 `references/examples/`，仓库测试 `tests/test_pd_route_check.py` 与文档读同一份 fixture。<br>0.5.1 起：2026-08-18：阶段 1 自由词句检索由 `mode=auto` 改为**钉死 `mode=semantic`**（`--search-mode` 可覆盖），并把「池子薄」告警换成「语义没打中」告警（top-1 score < 0.60 或 dominant cluster 不对）——auto 的标题层在 ≥3 条命中时被采纳、语义层永不执行，同一查询实测 23.2s/走完标题层 vs 1.65s，结果集相同。frontmatter 同步改 folded block。<br>0.4.2 起：2026-07-27 复查通过（0.4.0 质量整改：阶段 3a 派工规程落成 reference、阶段 1.5 清单收敛入流程、限流按 60/min 口径自节流 + Retry-After 退避 + 丢行不再静默、回传面披露发芽/积分/session 上限并转达 `unknown_paper_ids`。0.4.1 吃对照评测暴露的六条：**孪生行折叠**（同一论文以 arXiv id 与 OpenAlex W-id 双份进池，会把 `weak` 假升成 `supported`，实测 16 行=12 篇）、stderr 逐行 flush、阶段 1.5 选取自检、`anchor_coverage` 定死分母口径、种子模式 `--limit` off-by-one、worklist 行规范形状文档化；剩余不满足项如实列于下节「已知偏差」）。0.4.2 吃第二轮对照评测暴露的十条：孪生折叠补两类漏网（`oa_url` 派生 arXiv 号 / 同一篇挂不同 DOI 走标题归一，18 行=13 篇实测）+ 落 `worklist.twins.jsonl` 审计 + **收回 0.4.1 那句兑现不了的「rows written = 不重复篇数」保证**；`--similar` 默认回 2（1 会因最近邻是孪生顶点而静默零扩张，0.4.0 回归）；新增 `--append`（此前文档说可追加批次而脚本实为覆盖）；title 层薄池告警 + 阶段 1 gate 加「池 ≥ 2× 深读数」；账本拆出 `miss` 态（404/查无记录不再冒充 `denied`）；fetch 进度改开工即打；`anchor_coverage` 分母上限 18 写进派工模板；补 `decisions.md` 进产物树、`report.md` 撞 harness 护栏的对策、claims 三闸门合表、`fetch_report.jsonl` 主键名澄清 |
-
-## 已知偏差（thin 0.2.0 自查，2026-07-26）
-
-1. **条 1（声明件）——本次补齐**。原无声明块，现于 SKILL.md 头部声明
-   skill_ver / 协议版本 / scopes（默认只读三件，`write:profile` 按需索取）。
-2. **条 4（同意点）——本次整改**。原文把 watchlist `run` 写成「mostly
-   safe」并在 pre-flight 默认索取 `write:profile`，与本条直接冲突；现改为
-   create/delete/run 三个动作一律显式确认、写 scope just-in-time 索取。
-3. **条 2（phase-gate）——不适用**。thin skill 是单次查询包装，无多阶段
-   落盘工件链。
-4. **条 3/8（provenance / 产物树）——不适用**。不产生落盘产物，输出即
-   终端 markdown；无回传通道。
-
-## 已知偏差（deep-research 自查，如实记录）
-
-自查口径：对照上文十条逐条核对 `skills/paperdaily-deep-research/` 的 SKILL.md
-与三个脚本。满足项不赘述；以下为**仍不满足或仅部分满足**的条目：
-
-1. **条 2（phase-gate 可机检）——部分满足（0.6.0 补了一格）**。阶段 1a→1b
-   （worklist 行数/字段完备率 + INCOMPLETE 横幅）、**1d→1.5（`pd_route_check.py`
-   的结构与 coverage 判据，0.6.0 新增）**、**1.5→2（对收敛后的清单重跑同一个
-   脚本，要求 coverage=1.0 且无孤儿 analytical 节点，0.6.0 新增）**与阶段 4 入口
-   （notes/claims/report 完备性 + evidence 非空率）有脚本机检；但阶段 1.5 的
-   **规模**判据（8-15 篇）、2→3（fetch 覆盖率 6 成）与 3a→3b（notes 数 = 参与
-   深读篇数）的 gate 仍只写在 SKILL.md 文字层，由执行 agent 自查，无独立校验
-   脚本。0.4.0 把 3a 的笔记质量判据（`anchor_coverage` ≥80%、depth 与 fetch
-   账本一致）做成了子 agent 的结构化回传字段，比纯文字判据可核，但仍由主
-   agent 执行，不是脚本。
-2. **条 3（provenance 强制）——部分满足**。回传 payload 的 `provenance`
-   完整（kind/skill_ver/model/taxonomy/worklist_fingerprint）；
-   `worklist.meta.json` 侧车（0.2.0 新增）带检索目标 + created_at。但中间
-   产物（worklist.jsonl 行、overview.md、notes/*.md、synthesis/*）未逐件
-   携带 `{skill_ver, model, created_at}`——「一切产物带 provenance」尚未
-   全面落地；notes 的元数据依赖 agent 遵守模板，无机检。
-3. **条 7（检索规范）——满足但依赖 0.8.0 服务端**。resolve/search 是
-   0.8.0 新增端点；pd_worklist 对旧版服务端只报错（提示改用 taxonomy
-   目标），无进一步降级路径。v1 additive-only，视为部署过渡期现象，服务端
-   上线后自然消失。
-4. **条 9（网络瞬断退避）——0.4.0 起基本满足**。upload_session 对 429/5xx/瞬断
-   做指数退避（上限 3 次、尊重 Retry-After），并区分限流 429（带
-   `X-RateLimit-*`，退避重试）与 session 上限 429（不带，直接返回不重试）；
-   pd_worklist 0.4.0 改为按 `--throttle` 自节流到配额口径以下 + 429 时按
-   `Retry-After` 退避（上限 3 次），且丢行计数进 INCOMPLETE 横幅；
-   fetch_fulltext 对瞬断记账（`error` 态）后继续下一层/下一篇，不做同层重试
-   ——对账本语义是自洽的（error ≠ denied，可重跑续传），但不是字面意义的退避。
+历史性能数字、旧测试的通过结果和某台客户端上的版本均不能代替当前发布检查。

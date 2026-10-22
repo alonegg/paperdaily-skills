@@ -155,7 +155,7 @@ def validate_session(
                 problems.append("note depth contradicts the reading manifest: %s" % pid)
             if source.get("carrier") not in FULLTEXT or source.get("partial"):
                 problems.append("fulltext requires a complete fulltext carrier: %s" % pid)
-            if not record.get("reading_complete"):
+            if record.get("reading_complete") is not True:
                 problems.append("fulltext requires an explicit completed reading record: %s" % pid)
             if source.get("carrier") == "binary-pdf":
                 pages, count = record.get("pages_read"), record.get("page_count")

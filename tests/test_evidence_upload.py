@@ -114,6 +114,10 @@ class EvidenceUpload(unittest.TestCase):
         self.manifest["papers"][0]["reading_complete"] = False
         self.rejected("completed reading record")
 
+    def test_completed_reading_requires_a_boolean(self):
+        self.manifest["papers"][0]["reading_complete"] = "false"
+        self.rejected("completed reading record")
+
     def test_fulltext_requires_all_pdf_pages(self):
         self.manifest["papers"][0]["pages_read"] = [2]
         self.rejected("all pages read")

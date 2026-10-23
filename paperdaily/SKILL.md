@@ -10,7 +10,7 @@ description: >-
 
 # PaperDaily 查询
 
-- **skill_ver**: `0.4.0`
+- **skill_ver**: `0.4.1`
 - **协议**: AGENT_PROTOCOL v1
 - **基本 scope**: `read:paper`。
 - **按需 scope**: 日报 `read:digest`；个人收藏 `read:contrib`；服务端综合

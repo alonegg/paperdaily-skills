@@ -727,11 +727,17 @@ def main(command: str | None = None, argv: list[str] | None = None) -> int:
     if command is None:
         if not values or values[0] in ("-h", "--help"):
             sys.stdout.write(
-                "Commands: resolve search field author topics context bibliography worklist inbox watchlist doctor\n"
+                "Commands: resolve search field author topics context bibliography worklist inbox watchlist doctor supplement\n"
             )
             return 0
         command = values.pop(0)
     try:
+        if command == "supplement":
+            from pd_supplement import main as supplement_main
+            local_only = bool(values) and (values[0] == "validate" or "--help" in values or (values[0] == "submit" and "--dry-run" in values))
+            result = supplement_main(None if local_only else Client(load_settings()), values)
+            sys.stdout.write(json.dumps(result, ensure_ascii=False, indent=2) + "\n")
+            return 0
         args = parser_for(command).parse_args(values)
         settings = load_settings()
         if args.throttle is not None:

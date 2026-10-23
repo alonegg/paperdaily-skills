@@ -1,4 +1,4 @@
-# PaperDaily Deep Research 0.7.0
+# PaperDaily Deep Research 0.8.0
 
 从检索池到带来源锚点的综述，支持单 Agent 与已获授权的并行阅读。
 
@@ -12,3 +12,7 @@
 - 客户端与服务端部署分开验收，安装新 Skill 不等于启用服务端新端点。
 
 参阅 [证据契约与旧会话迁移](references/evidence-contract.md)。
+
+单篇补充使用 `pd.py supplement`，需要 jsonschema；推荐 `uv run --with jsonschema`。
+先探测服务能力；原文留本地，实际读取范围单独记录，提交后回读核验。
+参阅 [单篇补充流程](references/supplement-workflow.md)。

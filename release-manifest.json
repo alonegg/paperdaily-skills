@@ -5,7 +5,7 @@
     "paperdaily-deep-research": "0.8.0"
   },
   "files": {
-    ".github/workflows/ci.yml": "14ea0dd2307506c1d75c2cb60463f120494ed32b96c54eb35d1c1fa51b0f8cd6",
+    ".github/workflows/ci.yml": "538fcf920ab1be8675aaecfe579a257cfa0a830c01c40a9e23837d7ccd7f0f86",
     ".gitignore": "0cb5caf2ed6f098cd5c4a08f0dd17c4e2f5ba842e6127acf33f57fe745d17946",
     "AGENT_PROTOCOL.md": "ad595bca3fdb986c7b006724ca0991c05bd354d031e04336f34e51a9fc88bf74",
     "LICENSE": "eca1a45e70735498acce5167b1f48f824026317b093889f47e25c47b63fabd36",

@@ -70,6 +70,6 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Offline behavior and routing regression
-        run: uv run --no-project --python '${{ matrix.python }}' --with pytest pytest tests/ -q
+        run: uv run --no-project --python '${{ matrix.python }}' --with pytest --with jsonschema pytest tests/ -q
       - name: Verify release manifest
         run: python3 -c "from pathlib import Path; from install import verify; verify(Path('.'))"

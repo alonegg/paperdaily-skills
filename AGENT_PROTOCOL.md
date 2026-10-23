@@ -130,3 +130,29 @@
 - 兼容承诺：v1 端点 additive-only；破坏性变更先在已知问题清单立案，并在本文标注迁移窗口。
   - **已用掉的破坏性额度（v0.8.5）**：`claims[].evidence` 加 20 条上限（§4）。安全修复，不设迁移窗口；理由与影响面在 §4 的引注里写明。同批的其它变更都是加严服务端行为（共享需审核）或纯新增字段，不改请求形态。
 - skill 兼容矩阵见 `SKILL_SPEC.md` 文末。
+
+## 9. 单篇补充（supplement.v1，2.1.0；按capability探测部署支持）
+
+仅提供私人补充闭环。先GET /api/v1/capabilities确认paper_supplements.enabled和schema_versions；
+旧服务器404/405或disabled时保留本地工件，不回落旧session上传。公开来源建议尚未启用。
+
+- GET /papers/{paper_id}/supplement-context：read:paper，纯读平台baseline与材料范围，不抓取或入队。
+- POST /me/paper-supplements：read:paper+write:reading，{paper_id,baseline_hash,goals,note?,revision_of?}。
+- GET /me/paper-supplements 与 /{id}：read:reading，仅本人；列表支持paper_id/cursor/limit≤50。
+- POST /me/paper-supplements/{id}/claim、/renew：write:reading；Idempotency-Key，
+  X-Supplement-Lease（客户端32byte随机secret的64hex），renew另带X-Supplement-Generation。
+  lease 30分钟、任务7天；过期后显式新代际领取，旧代际无写权限。
+- POST /me/paper-supplements/{id}/submissions：write:reading，supplement.v1严格JSON证据包，
+  同上租约header；body≤512KiB、note≤64KiB、source≤3、finding≤30、总短引≤2000字符。
+  source记录自报版本/载体/hash/已读范围；typed page/section必须落在范围内；非gap finding引用真实存在的anchor。
+- POST /me/paper-supplements/{id}/cancel与DELETE /me/paper-supplements/{id}：本人取消/删除。
+
+所有新POST需Idempotency-Key；同键异内容409；回执含artifact_hash，需read:reading回读比较。
+已保存结果的重放不要求租约仍有效，不会重复写入；删除后的重放410。owner持久配额覆盖多key与Redis故障。
+修订创建新任务并引用本人同paper的已完成任务，结果不可变且默认private，不发积分、不自动发芽/回流画像。
+旧inbox不出现新task kind；原深读、上传与revision协议不变。
+
+客户端deep 0.8.0：pd.py supplement，离线校验需要jsonschema，PDF登记使用pdfinfo。
+prepare仅登记材料，不生成已读记录；partial保留实际范围，不冒称全文或摘要。原文和本地路径不回传。
+上传需用户授权；提交后核对同origin的内容与hash，不能以201或旧dedup响应宣称新修改已保存。
+成果保存、公开审核、平台全文获得与标准分析更新是不同结果。当前不提供Agent公开或来源抓取写接口。

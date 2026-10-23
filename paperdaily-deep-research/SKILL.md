@@ -5,13 +5,13 @@ description: >-
   candidate pool, organize and select papers, obtain authorized full texts,
   read with source anchors, synthesize evidence and optionally upload derived
   analysis. Use for deep reading, literature reviews, seed-paper research and
-  the research task inbox. Supports a single agent or explicitly authorized
+  the research task inbox and single-paper analysis supplements. Supports a single agent or explicitly authorized
   delegation; no specific model or client is required.
 ---
 
 # PaperDaily 深度研究
 
-- **skill_ver**: `0.7.0`
+- **skill_ver**: `0.8.0`
 - **协议**: AGENT_PROTOCOL v1
 - **基本 scope**: `read:paper`；可选 inbox/成果回读 `read:reading`，领取/上传/修订
   `write:reading`，显式服务端综合 `synth:ask`。
@@ -30,6 +30,13 @@ description: >-
 可选任务入口：`scripts/pd_inbox.sh --json`；已有领取授权时使用 `--claim ID`。
 缺 `read:reading`/`write:reading` 返回明确错误，不把权限不足显示为收件箱为空。
 可以继续其他已授权的本地研究，但要报告该步骤未完成。
+
+## 单篇补充入口
+
+用户要补充已有论文的分析，或给出补充任务 ID 时，先读
+[supplement-workflow.md](references/supplement-workflow.md) 与
+[supplement-security.md](references/supplement-security.md)。此模式支持局部阅读，
+不要求扩展检索池或制作跨篇综述；不要把它回落成旧 session 上传。
 
 ## 1. 检索、组织与筛选
 

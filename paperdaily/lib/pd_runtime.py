@@ -154,13 +154,15 @@ class Client:
         self.opener = urllib.request.build_opener(NoRedirect())
         self.calls: list[dict[str, Any]] = []
 
-    def request(self, method: str, path: str, body: Any = None, *, idempotent: bool = False) -> Any:
+    def request(self, method: str, path: str, body: Any = None, *, idempotent: bool = False, extra_headers: dict[str, str] | None = None) -> Any:
         if (
             not path.startswith("/")
             or path.startswith("//")
             or any(part == ".." for part in urllib.parse.unquote(path.split("?")[0]).split("/"))
         ):
             raise ApiError("request path must stay inside PD_BASE")
+        if set(extra_headers or {}) - {"Idempotency-Key", "X-Supplement-Lease", "X-Supplement-Generation"}:
+            raise ApiError("unsupported extra request header")
         can_retry = (
             method == "GET" or (method == "POST" and path.split("?")[0] in READ_POSTS) or idempotent
         )
@@ -179,6 +181,7 @@ class Client:
                     "Content-Type": "application/json",
                     "Accept": "application/json",
                     "User-Agent": "paperdaily-skills/2",
+                    **(extra_headers or {}),
                 },
             )
             status: int | None = None

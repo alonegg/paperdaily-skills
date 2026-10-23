@@ -5,8 +5,8 @@
 
 | Skill | 版本 | 用途 |
 |---|---|---|
-| [paperdaily](paperdaily/SKILL.md) | 0.4.0 | 标识符/标题/方向检索、作者消歧、学科近期论文、题录匹配与 watchlist |
-| [paperdaily-deep-research](paperdaily-deep-research/SKILL.md) | 0.7.0 | 检索、结构化筛选、全文获取、真实阅读记录、证据综合与可选上传/修订 |
+| [paperdaily](paperdaily/SKILL.md) | 0.4.1 | 标识符/标题/方向检索、作者消歧、学科近期论文、题录匹配与 watchlist |
+| [paperdaily-deep-research](paperdaily-deep-research/SKILL.md) | 0.8.0 | 检索、结构化筛选、全文获取、真实阅读记录、证据综合与可选上传/修订 |
 
 本次更新：统一有状态节流和 HTTP 错误处理；默认不调用 `/ask`；日期/scope 覆盖所有扩展通道；
 批量详情与 canonical/group 去重；每个选入 ID 有笔记或明确跳过；来源哈希和锚点校验；
@@ -89,3 +89,11 @@ uv run --no-project --with pytest pytest tests/ -q
 ```
 
 MIT，见 [LICENSE](LICENSE)。安全问题参见 [SECURITY.md](SECURITY.md)。
+
+## 补充已收录论文
+
+深读 Skill 支持单篇补充：先核对论文与版本，按实际已读页/章节补充方法、数据或结果。
+原始PDF不上传给PaperDaily；只保存派生分析与必要短引，默认私有。用户端模型是否联网由你的客户端配置决定。
+单篇模式需要 jsonschema（可用 `uv run --with jsonschema`），PDF登记使用本机 pdfinfo。
+操作与失败恢复见 [单篇补充流程](paperdaily-deep-research/references/supplement-workflow.md)。
+公开来源建议和公开共享本期未启用，补充保存不会自动更新平台全文或标准分析。

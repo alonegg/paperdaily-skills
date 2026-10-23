@@ -1,7 +1,7 @@
 # paperdaily MCP server — quickstart
 
 `paperdaily-mcp` is a stdio Model Context Protocol server that exposes
-the paperdaily v1 REST API as **29 agent tools**. Drop it into Claude
+the paperdaily v1 REST API as **32 agent tools**. Drop it into Claude
 Desktop / Claude Code / Cursor / any MCP-compatible runtime and the
 agent can auto-discover and call `paperdaily_get_digest_today`,
 `paperdaily_get_paper`, `paperdaily_ask`, etc. directly.
@@ -22,7 +22,7 @@ uv tool install --upgrade \
 ```
 
 Then restart your MCP connection. `paperdaily_update_profile` should appear
-among the 29 tools.
+among the 32 tools.
 
 PyPI still carries 0.1.0 as checked on 2026-10-13; that version does not
 include `paperdaily_update_profile`. Use the Git installation above for
@@ -68,7 +68,7 @@ add a `paperdaily` entry under `mcpServers`:
 > self-hosted deployment can point it at its own origin instead.
 
 Restart Claude Desktop. In a new conversation, open the tools list —
-you should see `paperdaily` with 29 tools.
+you should see `paperdaily` with 32 tools.
 
 ## Configure Claude Code
 
@@ -83,7 +83,7 @@ Verify:
 
 ```bash
 claude mcp list
-# paperdaily — stdio — 29 tools
+# paperdaily — stdio — 32 tools
 ```
 
 ## Sanity check from the terminal
@@ -100,7 +100,9 @@ You should see the top OpenAlex fields with paper counts in the
 millions. If that works but the agent sees no tools, the problem is on
 the MCP config side (env not reaching the process, binary not on PATH).
 
-## The 29 tools
+The three supplement tools are available in this Git source release. PyPI publication is separate; an older installed PyPI package may still expose 29 tools. Use the Git installation below when these three tools are needed. Supplement writes use the explicit Skill CLI workflow, not automatic MCP actions.
+
+## The 32 tools
 
 Mirror the v1 REST surface 1:1. Names follow the
 `paperdaily_<verb>_<noun>` convention.
@@ -136,6 +138,9 @@ Mirror the v1 REST surface 1:1. Names follow the
 | `paperdaily_get_dataset` | read:paper | `GET /datasets/{registry_id}` |
 | `paperdaily_get_dataset_narrative` | read:paper | `GET /datasets/{registry_id}/narrative` |
 | `paperdaily_list_datasets_for_subfield` | read:paper | `GET /datasets/by-subfield/{id}` |
+| `paperdaily_get_supplement_context` | read:paper | `GET /papers/{id}/supplement-context` |
+| `paperdaily_list_supplements` | read:reading | `GET /me/paper-supplements` |
+| `paperdaily_get_supplement` | read:reading | `GET /me/paper-supplements/{id}` |
 
 The four dataset tools read the **curated dataset registry** (human
 review gate: nothing enters without a proposal approved by a different
@@ -160,7 +165,7 @@ papers, or the weekly job hasn't reached it) / `hidden` (withdrawn by a
 human); the last two return 200 with empty arrays.
 
 Quotas are enforced server-side per (key tier, scope) — the same table
-as the REST surface. 429 responses carry `Retry-After` and
+as the REST surface. 432 responses carry `Retry-After` and
 `X-RateLimit-*` headers. Full rate-limit and error-code reference:
 <https://www.paperdaily.org/docs/api/quickstart.html>.
 

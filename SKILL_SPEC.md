@@ -1,6 +1,6 @@
 # PaperDaily Skill 规范 v1
 
-2026-10-22 更新；适用 thin 0.4.0 / deep 0.7.0，协议 AGENT_PROTOCOL v1。
+2026-10-23 更新；适用 thin 0.4.1 / deep 0.8.0，协议 AGENT_PROTOCOL v1。
 规范说明当前工件契约与客户端行为，不替代服务端部署验收。
 
 1. **声明与最小权限**：SKILL.md 声明 skill_ver、协议、必需/可选 scopes、运行条件。
@@ -41,7 +41,15 @@ upload_receipt.json            # 仅已确认上传后生成
 
 | Skill | 版本 | 验证范围 |
 |---|---|---|
-| paperdaily | 0.4.0 | 查询状态、节流/退避、范围过滤、作者消歧、题录与便携安装 |
-| paperdaily-deep-research | 0.7.0 | 上述查询层、路由校验、阅读证据门、上传/修订回执 |
+| paperdaily | 0.4.1 | 查询状态、节流/退避、范围过滤、作者消歧、题录与便携安装 |
+| paperdaily-deep-research | 0.8.0 | 上述查询层、路由校验、阅读证据门、上传/修订回执 |
 
 历史性能数字、旧测试的通过结果和某台客户端上的版本均不能代替当前发布检查。
+
+## 单篇补充兼容
+
+能力名 supplement.v1；默认私有。新服务器独立提供任务、严格证据包、租约、回执与不可变补充修订。
+旧服务器不支持时保留本地工件，不调用旧 reading-sessions 冒充补充保存成功。
+只读论文、个人回读、写入分别需要 read:paper/read:reading/write:reading。
+单篇模式需要 jsonschema，PDF登记可使用本机 pdfinfo；只读基础检索仍为标准库。
+公开来源建议与共享本期未启用，Agent不能替用户公开。

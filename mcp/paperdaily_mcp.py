@@ -652,6 +652,21 @@ _TOOLS: list[dict[str, Any]] = [
 ]
 
 
+_TOOLS.extend([
+    _t("paperdaily_get_supplement_context", "GET", "/api/v1/papers/{paper_id}/supplement-context",
+       description="Read a paper's supplement baseline and declared material coverage. Pure read; requires read:paper. It does not fetch, extract or verify a client source.",
+       path_params=("paper_id",), schema={"type":"object","properties":{"paper_id":{"type":"string","minLength":1,"maxLength":256}},"required":["paper_id"],"additionalProperties":False},
+       annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)),
+    _t("paperdaily_list_supplements", "GET", "/api/v1/me/paper-supplements",
+       description="List your own private supplement tasks; requires read:reading. Metadata only; does not claim tasks or upload content.",
+       query_params=("paper_id","limit"), schema={"type":"object","properties":{"paper_id":{"type":"string","maxLength":256},"limit":{"type":"integer","minimum":1,"maximum":50}},"additionalProperties":False},
+       annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)),
+    _t("paperdaily_get_supplement", "GET", "/api/v1/me/paper-supplements/{task_id}",
+       description="Read your private supplement outcome and receipt; requires read:reading. Client-declared evidence is not independently verified. No sharing or corpus update occurs.",
+       path_params=("task_id",), schema={"type":"object","properties":{"task_id":{"type":"string","pattern":"^[a-f0-9]{32}$"}},"required":["task_id"],"additionalProperties":False},
+       annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)),
+])
+
 _TOOL_BY_NAME: dict[str, dict[str, Any]] = {t["name"]: t for t in _TOOLS}
 
 
@@ -682,7 +697,11 @@ async def _dispatch(name: str, arguments: dict[str, Any]) -> list[types.TextCont
     for p in entry["path_params"]:
         if p not in arguments:
             return [types.TextContent(type="text", text=f"missing required path param: {p}")]
-        path = path.replace(f"{{{p}}}", str(arguments[p]))
+        if "supplement" in name:
+            from urllib.parse import quote
+            path = path.replace(f"{{{p}}}", quote(str(arguments[p]), safe=""))
+        else:
+            path = path.replace(f"{{{p}}}", str(arguments[p]))
 
     query: dict[str, Any] = {
         k: arguments[k] for k in entry["query_params"] if k in arguments and arguments[k] is not None

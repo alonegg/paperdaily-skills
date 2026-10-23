@@ -1,0 +1,442 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PaperDaily supplement.v1 request models",
+  "description": "Strict private supplement contract. Client-declared reading records are not independently verified evidence.",
+  "$defs": {
+    "Empty": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {},
+      "required": []
+    },
+    "CreateTask": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paper_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "baseline_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "goals": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "methods",
+              "datasets",
+              "results",
+              "limitations",
+              "claims",
+              "fulltext_source"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 6,
+          "uniqueItems": true
+        },
+        "note": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "revision_of": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "paper_id",
+        "baseline_hash",
+        "goals"
+      ]
+    },
+    "Source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        },
+        "sha256": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "carrier": {
+          "type": "string",
+          "enum": [
+            "binary-pdf",
+            "html-fulltext",
+            "parsed-fulltext",
+            "abstract"
+          ]
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "preprint",
+            "accepted",
+            "version-of-record",
+            "unknown"
+          ]
+        },
+        "identity_relation": {
+          "type": "string",
+          "enum": [
+            "same_version",
+            "same_work_other_version",
+            "uncertain"
+          ]
+        },
+        "extent": {
+          "type": "string",
+          "enum": [
+            "full",
+            "partial",
+            "abstract"
+          ]
+        },
+        "reading_complete": {
+          "type": "boolean"
+        },
+        "page_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "pages_read": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000
+          },
+          "minItems": 1,
+          "maxItems": 1000,
+          "uniqueItems": true
+        },
+        "sections_read": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "minItems": 1,
+          "maxItems": 100,
+          "uniqueItems": true
+        },
+        "anchors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "anchor_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "location": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "quote": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 300
+              },
+              "page": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 1000
+              },
+              "section": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "anchor_id",
+              "location",
+              "quote"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 60
+        }
+      },
+      "required": [
+        "source_id",
+        "sha256",
+        "carrier",
+        "version",
+        "identity_relation",
+        "extent",
+        "reading_complete",
+        "anchors"
+      ]
+    },
+    "Finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "field": {
+          "type": "string",
+          "enum": [
+            "methods",
+            "datasets",
+            "results",
+            "limitations",
+            "claims"
+          ]
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "add",
+            "correct"
+          ]
+        },
+        "statement": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "supported",
+            "weak",
+            "contested",
+            "gap"
+          ]
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "source_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "anchor_id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              }
+            },
+            "required": [
+              "source_id",
+              "anchor_id"
+            ]
+          },
+          "minItems": 0,
+          "maxItems": 5,
+          "uniqueItems": true
+        },
+        "prior_locator": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^/analysis/"
+        }
+      },
+      "required": [
+        "field",
+        "operation",
+        "statement",
+        "status",
+        "evidence"
+      ]
+    },
+    "Submission": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "supplement.v1"
+        },
+        "paper_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "baseline_hash": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "supplemented",
+            "partial",
+            "insufficient_material"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000
+        },
+        "provenance": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "model": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "skill_version": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 32
+            },
+            "executed_at": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "format": "date-time"
+            }
+          },
+          "required": [
+            "model",
+            "skill_version",
+            "executed_at"
+          ]
+        },
+        "note_md": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "sources": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Source"
+          },
+          "minItems": 0,
+          "maxItems": 3
+        },
+        "findings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Finding"
+          },
+          "minItems": 1,
+          "maxItems": 30
+        }
+      },
+      "required": [
+        "schema_version",
+        "paper_id",
+        "baseline_hash",
+        "outcome",
+        "provenance",
+        "note_md",
+        "sources",
+        "findings"
+      ]
+    },
+    "SourceCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "paper_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "public_url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "format": "uri",
+          "pattern": "^https://"
+        },
+        "version": {
+          "type": "string",
+          "enum": [
+            "preprint",
+            "accepted",
+            "version-of-record"
+          ]
+        },
+        "claimed_relation": {
+          "type": "string",
+          "enum": [
+            "same_version",
+            "same_work_other_version"
+          ]
+        },
+        "license_hint": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "supplement_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[A-Za-z0-9_-]+$"
+        }
+      },
+      "required": [
+        "paper_id",
+        "public_url",
+        "version",
+        "claimed_relation"
+      ]
+    }
+  },
+  "x-application-constraints": [
+    "Strict JSON parser: duplicate keys, NaN, NUL and nesting depth >16 rejected.",
+    "Actual UTF-8 byte caps before parse: Empty=1024, CreateTask=8192, Submission=524288, SourceCandidate=4096; note_md<=65536 bytes.",
+    "Source IDs and anchor IDs unique; evidence references existing source/anchor; aggregate quotes<=2000 characters.",
+    "PDF ranges within page_count; full means all pages and reading_complete, partial means nonempty scope and not complete.",
+    "Abstract carrier and extent agree; non-PDF uses sections; client identity uncertain requires review and is not accepted.",
+    "Non-gap findings have evidence; gap has none; correction points to existing field in task baseline.",
+    "Paper and baseline match owned task; artifact hash includes evidence and revision binding; request cannot set owner/visibility/verified.",
+    "Outcome supplemented has supported content and no partial sources; insufficient_material has reason and only gaps.",
+    "Source URL HTTPS443 without credentials/query/fragment/IP literal; provider/network checks occur in isolated worker.",
+    "Authorization, lease CAS, idempotency, quotas, origin/CSRF, deletion and moderation need runtime tests outside this schema."
+  ],
+  "oneOf": [
+    {
+      "$ref": "#/$defs/Empty"
+    },
+    {
+      "$ref": "#/$defs/CreateTask"
+    },
+    {
+      "$ref": "#/$defs/Submission"
+    },
+    {
+      "$ref": "#/$defs/SourceCandidate"
+    }
+  ]
+}

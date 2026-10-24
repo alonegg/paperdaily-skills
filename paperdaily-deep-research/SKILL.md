@@ -11,7 +11,7 @@ description: >-
 
 # PaperDaily 深度研究
 
-- **skill_ver**: `0.8.0`
+- **skill_ver**: `0.8.1`
 - **协议**: AGENT_PROTOCOL v1
 - **基本 scope**: `read:paper`；可选 inbox/成果回读 `read:reading`，领取/上传/修订
   `write:reading`，显式服务端综合 `synth:ask`。

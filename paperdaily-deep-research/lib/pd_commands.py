@@ -452,7 +452,7 @@ def synthesize(client: Client, rows: list[dict[str, Any]]) -> Any:
         return None
     return client.request(
         "POST",
-        "/ask",
+        "/ask?stream=true",
         {
             "question": "Use load_extractions(paper_ids=%s) for these papers only. "
             "Summarize findings and limitations with paper ids. Distinguish "

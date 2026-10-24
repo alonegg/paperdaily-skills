@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import logging
@@ -127,6 +128,48 @@ def endpoint(path: str, **params: Any) -> str:
     return path + ("?" + urllib.parse.urlencode(pairs) if pairs else "")
 
 
+def read_sse(response: Any, on_event: Callable[[str, dict[str, Any]], None] | None = None) -> dict[str, Any]:
+    """Consume a charged stream once; only a validated done result is success."""
+    if response.headers.get("Content-Type", "").split(";")[0].lower() != "text/event-stream":
+        raise ApiError("ask stream returned non-SSE content")
+    event, data, total = "message", [], 0
+    while True:
+        try:
+            raw = response.readline(1024 * 1024 + 1)
+        except (OSError, TimeoutError, http.client.HTTPException) as exc:
+            raise ApiError("ask stream disconnected; outcome unknown, do not automatically retry") from exc
+        if not raw:
+            raise ApiError("ask stream ended before done; outcome unknown, do not automatically retry")
+        total += len(raw)
+        if len(raw) > 1024 * 1024 or total > 32 * 1024 * 1024:
+            raise ApiError("ask stream exceeds client size limit")
+        try:
+            line = raw.decode("utf-8").rstrip("\r\n")
+            if not line:
+                if data:
+                    payload = json.loads("\n".join(data))
+                    if not isinstance(payload, dict):
+                        raise ValueError("event data must be an object")
+                    if on_event:
+                        on_event(event, payload)
+                    if event == "error":
+                        raise ApiError("ask stream failed; no complete answer (" + str(payload.get("error", "unknown")) + ")")
+                    if event == "done":
+                        if not isinstance(payload.get("answer"), str) or not isinstance(payload.get("cited_paper_ids"), list):
+                            raise ValueError("invalid final answer")
+                        return payload
+                event, data = "message", []
+            elif not line.startswith(":"):
+                field, _, value = line.partition(":")
+                value = value[1:] if value.startswith(" ") else value
+                if field == "event":
+                    event = value
+                elif field == "data":
+                    data.append(value)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise ApiError("invalid SSE event; no complete answer") from exc
+
+
 class Client:
     def __init__(
         self,
@@ -154,7 +197,7 @@ class Client:
         self.opener = urllib.request.build_opener(NoRedirect())
         self.calls: list[dict[str, Any]] = []
 
-    def request(self, method: str, path: str, body: Any = None, *, idempotent: bool = False, extra_headers: dict[str, str] | None = None) -> Any:
+    def request(self, method: str, path: str, body: Any = None, *, idempotent: bool = False, extra_headers: dict[str, str] | None = None, on_event: Callable[[str, dict[str, Any]], None] | None = None) -> Any:
         if (
             not path.startswith("/")
             or path.startswith("//")
@@ -166,6 +209,7 @@ class Client:
         can_retry = (
             method == "GET" or (method == "POST" and path.split("?")[0] in READ_POSTS) or idempotent
         )
+        streaming = path.split("?")[0] == "/ask" and urllib.parse.parse_qs(urllib.parse.urlsplit(path).query).get("stream") == ["true"]
         payload = None if body is None else json.dumps(body, ensure_ascii=False).encode()
         for attempt in range(self.settings.retries + 1):
             wait = self.next_call - self.clock()
@@ -179,7 +223,7 @@ class Client:
                 headers={
                     "Authorization": "Bearer " + self.settings.key,
                     "Content-Type": "application/json",
-                    "Accept": "application/json",
+                    "Accept": "text/event-stream" if streaming else "application/json",
                     "User-Agent": "paperdaily-skills/2",
                     **(extra_headers or {}),
                 },
@@ -190,6 +234,9 @@ class Client:
                 with self.opener.open(req, timeout=self.settings.timeout) as resp:
                     status = resp.status
                     headers = resp.headers
+                    if streaming:
+                        self.calls.append({"method": method, "path": "/ask", "status": status})
+                        return read_sse(resp, on_event)
                     raw = resp.read(32 * 1024 * 1024 + 1)
                 if len(raw) > 32 * 1024 * 1024:
                     raise ApiError("API response exceeds the 32 MiB client limit", status)

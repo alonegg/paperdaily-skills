@@ -203,3 +203,11 @@ The new tool requires an MCP client package containing `paperdaily_update_profil
   legacy `/api/tags/datasets` view.
 - **`transport error`** — the binary couldn't reach
   `PAPERDAILY_BASE_URL`. Test with the curl sanity check above.
+
+
+### 流式问答
+
+`paperdaily_ask` 使用 `/api/v1/ask?stream=true`，逐事件读取进度、正文与重试事件，
+以最终 `done` 的完整答案和引用返回结果。支持 MCP progressToken 的客户端可显示阶段进度；
+它不意味着每个 MCP 客户端都会逐字显示正文。流中 error 或提前 EOF 会作为失败返回，
+不会把半截内容当成功，也不会自动重新提交合成。升级 Git 安装的客户端后生效。

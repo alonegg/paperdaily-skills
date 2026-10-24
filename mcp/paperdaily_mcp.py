@@ -498,14 +498,15 @@ _TOOLS: list[dict[str, Any]] = [
         description="Ask paperdaily a natural-language question. The server runs a "
         "graph-aware tool loop (find_papers_by_topics, find_similar_papers, "
         "get_citation_context, …) and returns a synthesised answer with cited "
-        "paper ids. Costs internal LLM tokens; tight quota (free tier: 5/day). "
+        "paper ids. Consumes SSE progressively; the final corrected result is authoritative. "
+        "Free tier: 2 requests/minute, no daily cap. "
         "Requires `synth:ask` scope.",
         body_params=("question", "max_iters"),
         schema={
             "type": "object",
             "required": ["question"],
             "properties": {
-                "question": {"type": "string", "minLength": 1, "maxLength": 4000},
+                "question": {"type": "string", "minLength": 1, "maxLength": 32000},
                 "max_iters": {"type": "integer", "minimum": 1, "maximum": 8, "default": 5},
             },
             "additionalProperties": False,
@@ -682,12 +683,51 @@ def _client() -> httpx.AsyncClient:
         )
     return httpx.AsyncClient(
         base_url=base,
-        headers={"Authorization": f"Bearer {key}"},
+        headers={"Authorization": f"Bearer {key}", "User-Agent": "paperdaily-mcp/0.2"},
         timeout=30.0,
     )
 
 
-async def _dispatch(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+async def _ask_sse(cli: httpx.AsyncClient, path: str, body: Any, on_event: Any = None) -> Any:
+    """Read events as they arrive, without retrying a synthesis on failure."""
+    async with cli.stream("POST", path, params={"stream": "true"}, json=body,
+                          headers={"Accept": "text/event-stream"},
+                          timeout=httpx.Timeout(60.0, connect=10.0)) as response:
+        if response.status_code >= 400:
+            await response.aread()
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text}")
+        if response.headers.get("content-type", "").split(";")[0] != "text/event-stream":
+            raise RuntimeError("ask returned non-SSE content")
+        event, data, size = "message", [], 0
+        async for line in response.aiter_lines():
+            size += len(line.encode("utf-8"))
+            if size > 32 * 1024 * 1024:
+                raise RuntimeError("ask stream exceeds client size limit")
+            if not line:
+                if data:
+                    payload = json.loads("\n".join(data))
+                    if not isinstance(payload, dict):
+                        raise ValueError("event data must be an object")
+                    if on_event:
+                        await on_event(event, payload)
+                    if event == "error":
+                        raise RuntimeError("ask stream failed; no complete answer")
+                    if event == "done":
+                        if not isinstance(payload.get("answer"), str) or not isinstance(payload.get("cited_paper_ids"), list):
+                            raise ValueError("invalid final answer")
+                        return payload
+                event, data = "message", []
+            elif not line.startswith(":"):
+                field, _, value = line.partition(":")
+                value = value[1:] if value.startswith(" ") else value
+                if field == "event":
+                    event = value
+                elif field == "data":
+                    data.append(value)
+        raise RuntimeError("ask stream ended before done; outcome unknown, do not automatically retry")
+
+
+async def _dispatch(name: str, arguments: dict[str, Any], on_event: Any = None) -> list[types.TextContent]:
     """Translate an MCP tool call into a paperdaily REST request, return JSON as text."""
     entry = _TOOL_BY_NAME.get(name)
     if entry is None:
@@ -714,11 +754,14 @@ async def _dispatch(name: str, arguments: dict[str, Any]) -> list[types.TextCont
     method = entry["method"]
     async with _client() as cli:
         try:
+            if name == "paperdaily_ask":
+                payload = await _ask_sse(cli, path, body, on_event)
+                return [types.TextContent(type="text", text=json.dumps(payload, ensure_ascii=False, indent=2))]
             request_options: dict[str, Any] = {}
             if entry["timeout_s"] is not None:
                 request_options["timeout"] = entry["timeout_s"]
             r = await cli.request(method, path, params=query, json=body, **request_options)
-        except httpx.HTTPError as e:
+        except (httpx.HTTPError, RuntimeError, ValueError) as e:
             recovery = (
                 "\nSave outcome is unknown. Use paperdaily_get_profile to check "
                 "the saved narrative before resubmitting; do not automatically retry."
@@ -761,7 +804,25 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool()
 async def call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-    return await _dispatch(name, arguments)
+    progress = 0.0
+
+    async def notify(event: str, payload: dict[str, Any]) -> None:
+        nonlocal progress
+        if event not in {"progress", "restart"}:
+            return
+        ctx = server.request_context
+        token = ctx.meta.progressToken if ctx.meta else None
+        if token is not None:
+            try:
+                progress = max(progress, float(payload.get("elapsed_ms", 0)) / 1000)
+                await ctx.session.send_progress_notification(
+                    token, progress=progress,
+                    message=str(payload.get("stage") or event),
+                )
+            except Exception:
+                log.warning("MCP progress delivery failed", exc_info=True)
+
+    return await _dispatch(name, arguments, notify)
 
 
 async def _amain() -> None:

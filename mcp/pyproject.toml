@@ -11,7 +11,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paperdaily-mcp"
-version = "0.1.1"
+version = "0.2.0"
 description = "stdio MCP server for the paperdaily v1 API — 29 tools: daily digests, paper/author search, taxonomy, natural-language profile sync, follows, datasets, semantic ask"
 readme = "README.md"
 requires-python = ">=3.11"

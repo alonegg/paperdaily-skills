@@ -282,6 +282,50 @@ curl -X POST https://www.paperdaily.org/api/v1/ask \
 
 返回 `answer` 文本 + `cited_paper_ids` 引用列表 + `trace` 调试日志（每步 `name`/`args`/`result_summary`）。**单次响应 30-100 秒**，记得调大 client timeout。需要 `synth:ask` scope（默认不开，建表时手动勾）。
 
+### 综合提问的 SSE 流式响应
+
+需要逐步接收进度和正文时，显式开启 `stream=true`；不传或设为 false 仍返回原 JSON。
+
+```bash
+curl --no-buffer --fail-with-body \
+  'https://www.paperdaily.org/api/v1/ask?stream=true' \
+  -H "Authorization: Bearer $PD_KEY" \
+  -H 'Accept: text/event-stream' \
+  -H 'Content-Type: application/json' \
+  -d '{"question":"最近有哪些论文研究银行信贷中的因果推断？","max_iters":3}'
+```
+
+响应类型为 `text/event-stream`，每个事件以空行结尾，例如：
+
+```text
+event: progress
+data: {"stage":"retrieving","elapsed_ms":120}
+
+event: token
+data: {"delta":"根据已检索的论文"}
+
+event: done
+data: {"answer":"最终完整答案","cited_paper_ids":["W123"],"trace":[],"tokens_in":100,"tokens_out":50,"history_id":123}
+```
+
+示例省略了可选字段。`progress` 的公开阶段为 queued/retrieving/tool/candidates/writing；
+`token.delta` 是临时正文增量；`restart` 表示后端重试，须清空此前增量。
+`done` 携带完整原 JSON 答案字段、引用、history_id、credits 与 timings，必须以
+`done.answer` 覆盖预览并用最终引用校准展示，不能仅拼接 token 作为最终结果。
+心跳是 `: heartbeat` 注释，每约 20 秒静默发送一次，不是正文。
+
+唯一终态为 `done` 或 `error`。发生部分生成失败时，error 可携带
+`partial_result` 与 `partial=true`，历史标记失败并按失败结算；客户端不得把它当完整成功。
+连接在终态前结束表示结果未知，不能自动重新提交一次合成。连接断开后服务器仍继续完成
+生成、历史和结算，可按前期 progress 提供的 history_id 在账号中回看。
+401/403/429/402 等鉴权、scope、限速和余额拒绝在流开始前仍为普通 HTTP JSON 错误；
+流开始后的失败通过 error 事件报告，即使 HTTP 状态已经是 200 也不能判作成功。
+
+首事件、首答案 token 与总耗时是不同指标；前置检索仍需要时间。SSE 仅改变传输方式。
+Python 调用应逐行消费事件，避免 `.json()` 或一次性 `.read()`；MCP 分发器与
+Skill 的可选合成路径已同步逐事件读取，最终只返回校准后的 done 结果。
+MCP 客户端支持 progressToken 时会收到阶段通知，是否逐字展示由客户端能力决定。
+
 ### 深读回传与回看（reading sessions，0.8.0）
 
 deep-research skill 精读完一批论文后，可以（在你明确同意后）把**分析

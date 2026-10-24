@@ -1,8 +1,8 @@
 {
   "format": 1,
   "versions": {
-    "paperdaily": "0.4.1",
-    "paperdaily-deep-research": "0.8.0"
+    "paperdaily": "0.4.2",
+    "paperdaily-deep-research": "0.8.1"
   },
   "files": {
     ".github/workflows/ci.yml": "538fcf920ab1be8675aaecfe579a257cfa0a830c01c40a9e23837d7ccd7f0f86",
@@ -12,15 +12,15 @@
     "README.md": "f89137d07145ecbf7a54397b19a0e4e8ef4f6d685b44ef8e1de21cee2fac033e",
     "SECURITY.md": "24eb2c66d4f88d11b84ae70021d0fd41ee1f21f7c7835a4cd8d1a0f6ce62b021",
     "SKILL_SPEC.md": "67c77a4cdc5e6cbac87eda1007f232b5cafc971b78e9c5ea3a601619132e2de0",
-    "docs/quickstart-zh.md": "5ca16494d4468a8bb5393a9e4fac10704665a3c764dc3ce85714b8729eddb8f5",
+    "docs/quickstart-zh.md": "330d7704e980ea6768976191af3fa6eb51fd8ba5226322c70f09b9582c83ec74",
     "install.py": "e0d6200f17fc47546c2f4bf1de9173688692a855637f043417a65a8d20174cfb",
-    "mcp/README.md": "c2296b6355655a64ae71dbecd9c04d5a5d05710f8f4f0837f7861b07de516c24",
-    "mcp/paperdaily_mcp.py": "7e1658dcd74abf7d88f335201c06d9bdb2b6681b6888334c1c4c94ce83914417",
-    "mcp/pyproject.toml": "55a9698ac02027b3ca521b34989492e1246221f1909767cde1462645e75c37e4",
-    "paperdaily/SKILL.md": "48d1ee9ecc714aaa3a61ca1e696216fc6d63d8114cffb7cb65bf5e7ae8cb0fd7",
+    "mcp/README.md": "78658822f87e64e271ad9ff9177d49ec955b6598a22ae2134a4205a4e94d79da",
+    "mcp/paperdaily_mcp.py": "c2221e4d201f24db4387cd32f0b301431554c3a40a7271d5167652a20dd2361f",
+    "mcp/pyproject.toml": "28b52f04e2a97ca6298eed55f8fe0105a2fe2ffebbff59a76c046f84c022ea72",
+    "paperdaily/SKILL.md": "87cc2814d5a5c79e1231924febe67e5cc076530d5adad9e9e3ded63f4e38fb4a",
     "paperdaily/lib/paper_supplement_requests.json": "bf69d4226966de4af72045e1ed7137da22a5ffb512938d4ae96e6ee5c6de1fa6",
-    "paperdaily/lib/pd_commands.py": "2ebabba289b0d9b6169e635cce7c5b5e180b8415f2febb66a3bd26796a219a5c",
-    "paperdaily/lib/pd_runtime.py": "2a90ece56b3e435df69dd5b2a8adc4c1a21d276b30c3ae06cddc05c6122390b3",
+    "paperdaily/lib/pd_commands.py": "0036c80ab2350aa7233b1cdc983b5875f68470816f54441c25b2768827201d49",
+    "paperdaily/lib/pd_runtime.py": "9df9200babda9cd118a10a484532fba40a4baa5cede2922c4023cc11e5edda4d",
     "paperdaily/lib/pd_supplement.py": "522bc26f21da9c438d85441fbd9dcbc8be79674bfe1563c6f6f5942ab8fff9fe",
     "paperdaily/lib/pd_supplement_contract.py": "772596a90aa2f7069f6a83e8131e228ad95f765e5760a00d3fc7287c367b6be6",
     "paperdaily/references/semantic-search.md": "4dc141bc98513ad72049b1db86566d2cdaa283cbe375f7e295aa464cca24ea5b",
@@ -32,10 +32,10 @@
     "paperdaily/scenarios/topic-find.sh": "4b572a2e6bdcccb71674ccf05e751eef0aecd69d2d20aadce4426d8085ea2722",
     "paperdaily/scenarios/watchlist.sh": "8d9995f75ebda6441868973b968c97ca66ebe9e7f608ff412ff3aadc7f009985",
     "paperdaily-deep-research/README.md": "2ba40f5f5abe3f102645597b86bc557197ecc3fedd2218fa0cd651294c060aeb",
-    "paperdaily-deep-research/SKILL.md": "fde4d11df2e907bf3699d66f8d5c226a22452f2d7e05ec32ffe7f57c2039cb78",
+    "paperdaily-deep-research/SKILL.md": "44cc703cf22f3d29397ff2603de90f3b940e8445f8d2d25434de53064133c15c",
     "paperdaily-deep-research/lib/paper_supplement_requests.json": "bf69d4226966de4af72045e1ed7137da22a5ffb512938d4ae96e6ee5c6de1fa6",
-    "paperdaily-deep-research/lib/pd_commands.py": "2ebabba289b0d9b6169e635cce7c5b5e180b8415f2febb66a3bd26796a219a5c",
-    "paperdaily-deep-research/lib/pd_runtime.py": "2a90ece56b3e435df69dd5b2a8adc4c1a21d276b30c3ae06cddc05c6122390b3",
+    "paperdaily-deep-research/lib/pd_commands.py": "0036c80ab2350aa7233b1cdc983b5875f68470816f54441c25b2768827201d49",
+    "paperdaily-deep-research/lib/pd_runtime.py": "9df9200babda9cd118a10a484532fba40a4baa5cede2922c4023cc11e5edda4d",
     "paperdaily-deep-research/lib/pd_supplement.py": "522bc26f21da9c438d85441fbd9dcbc8be79674bfe1563c6f6f5942ab8fff9fe",
     "paperdaily-deep-research/lib/pd_supplement_contract.py": "772596a90aa2f7069f6a83e8131e228ad95f765e5760a00d3fc7287c367b6be6",
     "paperdaily-deep-research/references/deep-read-agent-prompt.md": "48e9dc941e914ab62191e8038f45fc3afca12a3ac8f4360a83aef44f69487555",
@@ -64,6 +64,7 @@
     "tests/test_install.py": "0d3440cfb73bb05b141d1fcbe3eb4aab91cc2978b97ae541cc40b9e77e468c52",
     "tests/test_route_check.py": "2310951f9872ffab622cc5a4ccb4f58a2e80f7d5d43303362e7ea6642c4921a5",
     "tests/test_runtime.py": "8bafb58db092769f4424fcebc815f0e3e422b54523720a99fb077f951b4a1a7a",
+    "tests/test_sse.py": "7bd3d36b10b48512b12c377146b94385321405cb7b2bd17d9b219d65e519fd1f",
     "tests/test_supplements.py": "464a4c6300357f7be759f1de18cc073dd049eafa0e54f31c701e66cce65b92ad"
   }
 }

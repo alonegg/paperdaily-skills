@@ -211,3 +211,6 @@ The new tool requires an MCP client package containing `paperdaily_update_profil
 以最终 `done` 的完整答案和引用返回结果。支持 MCP progressToken 的客户端可显示阶段进度；
 它不意味着每个 MCP 客户端都会逐字显示正文。流中 error 或提前 EOF 会作为失败返回，
 不会把半截内容当成功，也不会自动重新提交合成。升级 Git 安装的客户端后生效。
+
+
+`paperdaily_get_supplement_context` 只读取 `/supplement-context` 的补充任务 baseline/材料范围，不能替代 `/context-bundle` 的引用邻域、版本链、topic与用户历史。当前32个MCP工具没有独立context-bundle工具；需要该上下文时，可使用Skill的deep-read入口（运行时会读取context-bundle）或按Agent协议调用REST，不要把supplement返回值改名为bundle。

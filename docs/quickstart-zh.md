@@ -547,9 +547,25 @@ for pid in ["W4404012345", "W4404012346", "W4404012347"]:
 | GET | `/me/saves?limit=` | 你收藏的论文（`{"items":[...], "total":N}`，默认 100 / 上限 500） |
 
 每条带 `paper_id` / `title` / `publication_date` / `doi` / `venue_name` /
-`venue_badges` / `tldr_zh`，与网页「已保存」页同一份数据同一套字段——拿到即用，
+`venue_badges` / `tldr_zh`，旧版兼容题录字段——拿到即用，
 不必再逐篇打 `/papers/{id}`。按发表日期倒序（**不是收藏时间**：底层 `SAVED`
 边不带时间戳）。
+
+**数量与完整性**：当前 `total` 等于本次 `items` 的条数，不是完整收藏总数；
+没有 `cursor`、`offset` 或下一页信息。达到 `limit` 时不能证明清单完整，不能用
+重复请求或提高到超过 500 的值来补全。当前不支持收藏关键词、合集过滤、收藏时间
+排序、增量版本或删除事件，不能把 `/me/saves` 当作无损论文库同步接口。
+
+```bash
+curl --fail-with-body -sS \
+  -H "Authorization: Bearer $PD_KEY" \
+  'https://paperdaily.org/api/v1/me/saves?limit=100'
+```
+
+这个接口返回题录与已有简述，不传输 PDF；网页 `/api/papers/{id}/pdf` 依赖
+Cookie 登录，不能假定它接受 v1 Bearer key。2.3.0 新增 `/me/library/items`，支持搜索、组合筛选、
+完整快照分页及导出。新接入请使用[个人论文库 API](personal-library.html)，不要从旧接口推断全库数量。
+Zotero 风格接口、增量同步、Bearer 附件与 Read it DEEP 直接导入仍待实施。
 
 > **要「用户收藏了什么」就读这个端点，不要从 `/me/feedback` 反推。** feedback
 > 是行为流水，只记录经反馈路径产生的动作；在网页「已保存」里直接点收藏的论文

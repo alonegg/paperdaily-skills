@@ -22,7 +22,7 @@ git clone https://github.com/alonegg/paperdaily-skills.git ~/.paperdaily-skills
 cd ~/.paperdaily-skills
 python3 install.py --agent codex --check
 python3 install.py --agent codex --apply
-# 可选 --agent claude、--agent agents 或 --agent all
+# 可选 --agent claude、--agent agents、--agent workbuddy 或 --agent all
 ```
 
 `--check` 只读；有漂移退出 1，发布清单/哈希不合法退出 2。`--apply` 先验证发布清单，
@@ -31,6 +31,8 @@ python3 install.py --agent codex --apply
 发布哈希用于检查内容一致性，不是发布者签名。
 
 升级时先检查 clone 的本地修改，保留自定义内容后 `git pull --ff-only`，再运行 check/apply。
+WorkBuddy 可先运行 `python3 install.py --agent workbuddy --check` 对比已安装副本；活跃研究会话结束后再显式 apply，避免中途更换脚本。
+
 安装后新建会话或重载 Skills，使客户端重新读取说明；已开启会话可能仍持有旧内容。
 恢复时按 apply 输出中的 backup 路径逐项恢复，并保留当前副本以便比较。
 

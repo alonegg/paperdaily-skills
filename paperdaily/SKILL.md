@@ -10,7 +10,7 @@ description: >-
 
 # PaperDaily 查询
 
-- **skill_ver**: `0.4.2`
+- **skill_ver**: `0.4.3`
 - **协议**: AGENT_PROTOCOL v1
 - **基本 scope**: `read:paper`。
 - **按需 scope**: 日报 `read:digest`；个人收藏 `read:contrib`；服务端综合
@@ -94,3 +94,6 @@ PaperDaily `/paper/<URL 编码的 id>`。
 遇异常保留可复现命令、时间、HTTP 状态和脱敏响应；不保留 key、cookie、私人稿件正文。
 先保存本地记录，向外提交 Issue/邮件须有用户授权。见
 [当前限制与迁移](references/v1-known-issues.md)。
+
+
+MCP `paperdaily_get_supplement_context` 提供补充任务的baseline/材料范围，**不是**引用邻域、版本链、topic与用户历史的context-bundle。需要后者时使用deep-read的REST读取路径。旧Bash/jq作者脚本应升级到附带Python runtime的完整Skill；HTTP错误对象不能当作者列表，不能据jq报错猜测affiliations字段发生了类型变化。

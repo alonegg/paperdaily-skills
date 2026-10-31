@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 SKILLS = ("paperdaily", "paperdaily-deep-research")
-AGENTS = {"codex": ".codex/skills", "claude": ".claude/skills", "agents": ".agents/skills"}
+AGENTS = {"codex": ".codex/skills", "claude": ".claude/skills", "agents": ".agents/skills", "workbuddy": ".workbuddy/skills"}
 
 
 def verify(root: Path) -> dict:

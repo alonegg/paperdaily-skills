@@ -413,7 +413,17 @@ def author(client: Client, args: argparse.Namespace) -> dict[str, Any]:
     else:
         if not args.name:
             raise ApiError("provide a name, --author-id or --orcid")
-        authors = items(client.get(endpoint("/authors", q=" ".join(args.name), limit=100)))
+        try:
+            authors = items(client.get(endpoint("/authors", q=" ".join(args.name), limit=100)))
+        except ApiError as exc:
+            if exc.status == 400:
+                raise ApiError(
+                    "Author name query rejected (HTTP 400); this does not mean no author exists. "
+                    "Use a verified --author-id or --orcid, or retry after the service accepts "
+                    "the name punctuation. Do not guess an identity or silently remove punctuation.",
+                    400,
+                ) from exc
+            raise
     if args.affiliation:
         authors = [
             a

@@ -655,7 +655,7 @@ _TOOLS: list[dict[str, Any]] = [
 
 _TOOLS.extend([
     _t("paperdaily_get_supplement_context", "GET", "/api/v1/papers/{paper_id}/supplement-context",
-       description="Read a paper's supplement baseline and declared material coverage. Pure read; requires read:paper. It does not fetch, extract or verify a client source.",
+       description="Read a paper's supplement-task baseline and declared material coverage. This is NOT context-bundle: it does not return the citation neighborhood, version chain, topics or user history. Pure read; requires read:paper. It does not fetch, extract or verify a client source.",
        path_params=("paper_id",), schema={"type":"object","properties":{"paper_id":{"type":"string","minLength":1,"maxLength":256}},"required":["paper_id"],"additionalProperties":False},
        annotations=types.ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True)),
     _t("paperdaily_list_supplements", "GET", "/api/v1/me/paper-supplements",

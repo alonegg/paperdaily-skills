@@ -36,6 +36,15 @@ class Installation(unittest.TestCase):
             json.dumps({"files": files, "versions": versions})
         )
 
+    def test_workbuddy_check_does_not_change_active_copy(self):
+        old = self.home / ".workbuddy" / "skills" / "paperdaily"
+        old.mkdir(parents=True)
+        (old / "active.txt").write_text("keep running")
+        result = installer.install(self.root, self.home, ["workbuddy"], False)
+        self.assertEqual((old / "active.txt").read_text(), "keep running")
+        self.assertFalse(old.is_symlink())
+        self.assertTrue(all(r["status"] == "update_needed" for r in result["results"]))
+
     def test_check_has_no_side_effects(self):
         result = installer.install(self.root, self.home, ["codex"], False)
         self.assertFalse(self.home.exists())

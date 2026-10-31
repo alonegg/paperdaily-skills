@@ -248,6 +248,29 @@ class Contracts(unittest.TestCase):
         ]
         self.assertEqual(len(collapse(rows)), 1)
 
+    def test_author_http_error_is_not_an_author_match(self):
+        self.route("/authors", {"detail": "invalid name"}, 400)
+        with self.assertRaises(ApiError) as caught:
+            commands.author(self.client, self.args("author", "Dell'Acqua"))
+        self.assertEqual(caught.exception.status, 400)
+        self.assertIn("--author-id", str(caught.exception))
+        self.assertIn("does not mean no author exists", str(caught.exception))
+        self.assertEqual(len(Handler.calls), 1)
+
+    def test_author_error_object_with_200_is_rejected(self):
+        self.route("/authors", {"detail": "fixture error"})
+        with self.assertRaisesRegex(ApiError, "valid items array"):
+            commands.author(self.client, self.args("author", "Dell'Acqua"))
+        self.assertEqual(len(Handler.calls), 1)
+
+    def test_author_affiliation_shapes_are_not_jq_program_input(self):
+        for affiliations in (["University"], "University", None):
+            self.route("/authors", [{"id": "A1", "name": "Dell'Acqua", "affiliations": affiliations}])
+            self.route("/authors/A1/papers", {"items": []})
+            result = commands.author(self.client, self.args("author", "Dell'Acqua"))
+            self.assertEqual(result["status"], "complete")
+            self.assertEqual(result["authors"][0]["affiliations"], affiliations)
+
     def test_author_ambiguity_requires_selection(self):
         self.route("/authors", [{"id": "A1", "name": "Li"}, {"id": "A2", "name": "Li"}])
         result = commands.author(self.client, self.args("author", "Li"))

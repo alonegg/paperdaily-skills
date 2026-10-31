@@ -4,6 +4,8 @@
 > **定位**: 本地 agent（用户侧客户端与 skills）↔ paperdaily 服务端的**对外契约单一呈现层**。本文是契约的权威呈现；`quickstart-zh.md` 是示例层，与本文冲突时以本文为准。服务端行为以运行版本的 OpenAPI 为准。
 > **心智模型**: 车间与总控室——agent（车间，多实例）做认知与授权全文；服务端（总控室，单实例）做记忆、图谱、路由。分析真相在服务端，原文真相在本地。
 
+> **2.3.0 个人论文库（2026-10-24）**：原生 `/me/library` 支持搜索、组合筛选、完整快照分页、私人备注/阅读状态、批量归类与五种题录导出，见 [实施契约](personal-library.md)。`read:contrib` 读取，`write:contrib` 修改，均由 key 绑定账号。旧 `/me/saves` 保持兼容。Zotero profile、Read it DEEP 连接器、增量同步与 Bearer 附件后续实施；不得将原生 snapshot version 当成增量同步水位。
+
 ## 1. 身份与授权
 
 - 凭证：`Authorization: Bearer pd_live_…`，在 web `/account` → API Keys 签发；明文仅显示一次。
@@ -67,7 +69,8 @@
 | signals | novelty 分、被引数、subfield 最近周 pulse 摘要 |
 | you | **你的**历史关联：claims / notes / 综述矩阵 / 合集 / 深读 session 命中 |
 
-- `GET /api/v1/me/saves?limit=`（`read:contrib`，纯读 0 分，0.8.6 新增）：**用户收藏库**——`{items:[{paper_id, title, publication_date, doi, venue_name, venue_badges, tldr_zh}], total}`，与 web 库页同一份查询同一套富化字段（agent 拿到即用，不必逐篇再打 `/papers/{id}`）。`limit` 默认 100、上限 500；按 `publication_date` 倒序（**不是收藏时间**——AGE 的 `SAVED` 边无时间戳）。
+- `GET /api/v1/me/saves?limit=`（`read:contrib`，纯读 0 分，0.8.6 新增）：**用户收藏库**——`{items:[{paper_id, title, publication_date, doi, venue_name, venue_badges, tldr_zh}], total}`，保留旧查询与富化字段（agent 拿到即用，不必逐篇再打 `/papers/{id}`）。`limit` 默认 100、上限 500；按 `publication_date` 倒序（**不是收藏时间**——AGE 的 `SAVED` 边无时间戳）。
+  - **当前完整性边界（2026-10-24）**：`total=len(items)` 为本次返回条数，不是全库总数；无游标分页、搜索、合集过滤、增量版本或删除日志。返回数等于 limit 时不能声明完整导出。响应不含 PDF，现有 Cookie PDF 入口不等于 Bearer 附件接口；Zotero profile 与 Read it DEEP 连接器仍待实施。
   > **要「用户收藏了什么」只能读这个端点，不要拿 `GET /me/feedback` 反推。** feedback 是行为流水，只记录经反馈路径产生的动作；用户在库页直接点收藏的论文根本不进流水，反推出的清单会系统性偏少（实地案例：库里 20 篇、反推只得 6 篇）。这个端点 0.8.6 之前不存在，是当时唯一能凑合的替代——现在不是了。
 - `you.open_questions_total` = **用户级** open 问题总数（问题收件箱整体水位，不随当前论文变化——不是"与本篇相关的问题数"）。
 - 规范：深读一篇论文前**应**拉取 bundle 注入精读上下文（"在知识全景中读"——邻域立场、版本沿革、领域脉搏与你自己的历史论断一并进 prompt）；bundle 即拉即用不缓存跨日（内容随库演进）；404 = 论文未收录，按业务降级为直接精读，不视为故障。

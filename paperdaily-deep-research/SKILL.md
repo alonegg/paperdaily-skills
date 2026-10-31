@@ -11,7 +11,7 @@ description: >-
 
 # PaperDaily 深度研究
 
-- **skill_ver**: `0.8.1`
+- **skill_ver**: `0.8.2`
 - **协议**: AGENT_PROTOCOL v1
 - **基本 scope**: `read:paper`；可选 inbox/成果回读 `read:reading`，领取/上传/修订
   `write:reading`，显式服务端综合 `synth:ask`。
@@ -131,3 +131,6 @@ HTTP 429 可能是配额或 session 上限，不能删除既有会话来自动�
 
 查询退出码沿用 thin：0 完成、2 参数、3 错误、4 partial、5 待消歧。
 上传退出码：0 已确认、1 配置、2 证据门失败、3 请求失败或未核实。
+
+
+MCP `paperdaily_get_supplement_context` 提供补充任务的baseline/材料范围，**不是**引用邻域、版本链、topic与用户历史的context-bundle。需要后者时使用deep-read的REST读取路径。旧Bash/jq作者脚本应升级到附带Python runtime的完整Skill；HTTP错误对象不能当作者列表，不能据jq报错猜测affiliations字段发生了类型变化。
